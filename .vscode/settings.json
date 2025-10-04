@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "x.h": "c",
+        "unistd.h": "c",
+        "types.h": "c"
+    }
+}
