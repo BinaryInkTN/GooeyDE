@@ -357,7 +357,7 @@ static Cursor CreateCustomCursor(GooeyShellState *state)
     Cursor cursor = None;
 
     const char *possible_paths[] = {
-        "./cursor.png",
+        "./assets/cursor.png",
         "~/.gooey_shell/cursor.png",
         "/usr/share/gooey_shell/cursor.png",
         NULL};
