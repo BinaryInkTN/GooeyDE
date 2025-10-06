@@ -16,7 +16,6 @@ int main()
     printf("Press Alt+F4 to close focused window\n");
     printf("Press Alt+F11 to toggle fullscreen\n");
 
-    GooeyShell_SetBackground(desktop, 0x333333);
 
     printf("Launching taskbar as desktop app...\n");
     pid_t taskbar_pid = fork();
@@ -24,10 +23,11 @@ int main()
     {
 
         setenv("GOOEY_DESKTOP_APP", "1", 1);
-        execl("./gooeyde_taskbar", "./gooeyde_taskbar", NULL);
+        execl("./gooeyde_desktop", "./gooeyde_desktop", NULL);
         perror("Failed to launch taskbar");
         exit(1);
     }
+    //GooeyShell_AddFullscreenApp(desktop, "gooeyde_appmenu", 1);
 
     sleep(2);
 /*  printf("Launching canvas test as regular window...\n");
