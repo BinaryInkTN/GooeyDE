@@ -1,460 +1,592 @@
-#include <gooey.h>
+#include "gooey.h"
+#include "utils/resolution_helper.h"
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <GLPS/glps_thread.h>
 
-typedef struct
+GooeyTabs *settings_tabs = NULL;
+GooeyWindow *win = NULL;
+GooeySwitch *wifi_switch = NULL;
+GooeySwitch *bluetooth_switch = NULL;
+GooeyList *wifi_list = NULL;
+GooeyList *bluetooth_list = NULL;
+GooeyButton *refresh_wifi_btn = NULL;
+GooeyButton *refresh_bluetooth_btn = NULL;
+
+#define MAX_WIFI_NETWORKS 128
+#define MAX_BT_DEVICES 128
+
+static char wifi_ssids[MAX_WIFI_NETWORKS][128];
+static int wifi_count = 0;
+static gthread_mutex_t wifi_mutex;
+static bool wifi_scanning = false;
+
+static char bt_devices[MAX_BT_DEVICES][128];
+static char bt_addresses[MAX_BT_DEVICES][64];
+static int bt_count = 0;
+static gthread_mutex_t bt_mutex;
+static bool bt_scanning = false;
+
+static void *wifi_scan_thread(void *arg)
 {
-    bool wifi_enabled;
-    bool bluetooth_enabled;
-    long brightness_level;
-    long volume_level;
-    char current_network[64];
-} AppSettings;
+    glps_thread_mutex_lock(&wifi_mutex);
+    wifi_scanning = true;
+    wifi_count = 0;
+    glps_thread_mutex_unlock(&wifi_mutex);
 
-static AppSettings settings;
-
-static GooeySwitch *wifi_switch = NULL;
-static GooeySwitch *bluetooth_switch = NULL;
-static GooeySlider *brightness_slider = NULL;
-static GooeySlider *volume_slider = NULL;
-static GooeyList *network_list = NULL;
-static GooeySwitch *mute_switch = NULL;
-
-void execute_system_command(const char *command)
-{
-    system(command);
-}
-
-long get_system_brightness()
-{
-    FILE *fp = popen("cat /sys/class/backlight/*/brightness 2>/dev/null | head -1", "r");
+    FILE *fp = popen("nmcli -t -f SSID,SIGNAL dev wifi", "r");
     if (fp)
     {
-        long brightness = 50;
-        fscanf(fp, "%ld", &brightness);
-        pclose(fp);
-        return brightness;
-    }
-    return 50;
-}
-
-long get_max_brightness()
-{
-    FILE *fp = popen("cat /sys/class/backlight/*/max_brightness 2>/dev/null | head -1", "r");
-    if (fp)
-    {
-        long max_brightness = 100;
-        fscanf(fp, "%ld", &max_brightness);
-        pclose(fp);
-        return max_brightness;
-    }
-    return 100;
-}
-
-long get_system_volume()
-{
-    FILE *fp = popen("pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | grep -oP '\\d+(?=%)' | head -1", "r");
-    if (fp)
-    {
-        long volume = 50;
-        fscanf(fp, "%ld", &volume);
-        pclose(fp);
-        return volume;
-    }
-    return 50;
-}
-
-bool get_system_wifi_state()
-{
-    FILE *fp = popen("nmcli radio wifi 2>/dev/null", "r");
-    if (fp)
-    {
-        char state[16];
-        if (fgets(state, sizeof(state), fp))
+        char line[256];
+        while (fgets(line, sizeof(line), fp))
         {
-            pclose(fp);
-            return strstr(state, "enabled") != NULL;
+            glps_thread_mutex_lock(&wifi_mutex);
+            if (wifi_count >= MAX_WIFI_NETWORKS)
+            {
+                glps_thread_mutex_unlock(&wifi_mutex);
+                break;
+            }
+
+            char ssid[128] = {0};
+            char signal[32] = {0};
+            char *sep = strchr(line, ':');
+            if (sep)
+            {
+                size_t ssid_len = sep - line;
+                strncpy(ssid, line, ssid_len);
+                ssid[ssid_len] = '\0';
+                strncpy(signal, sep + 1, sizeof(signal) - 1);
+                signal[strcspn(signal, "\n")] = 0;
+
+                char entry[160];
+                snprintf(entry, sizeof(entry), "%s (Signal: %s%%)",
+                         ssid[0] ? ssid : "<Hidden>", signal);
+
+                GooeyList_AddItem(wifi_list, "", entry);
+                strncpy(wifi_ssids[wifi_count], ssid[0] ? ssid : "<Hidden>",
+                        sizeof(wifi_ssids[wifi_count]) - 1);
+                wifi_ssids[wifi_count][sizeof(wifi_ssids[wifi_count]) - 1] = '\0';
+                wifi_count++;
+            }
+            glps_thread_mutex_unlock(&wifi_mutex);
         }
         pclose(fp);
     }
-    return false;
-}
 
-bool get_system_bluetooth_state()
-{
-    FILE *fp = popen("bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' && echo enabled", "r");
-    if (fp)
+    glps_thread_mutex_lock(&wifi_mutex);
+    wifi_scanning = false;
+    if (wifi_count == 0)
     {
-        char state[16];
-        if (fgets(state, sizeof(state), fp))
-        {
-            pclose(fp);
-            return strstr(state, "enabled") != NULL;
-        }
-        pclose(fp);
+        GooeyList_AddItem(wifi_list, "", "No networks found");
     }
-    return false;
+    glps_thread_mutex_unlock(&wifi_mutex);
+
+    return NULL;
 }
 
-bool get_system_mute_state()
+static void refresh_wifi_list()
 {
-    FILE *fp = popen("pactl get-sink-mute @DEFAULT_SINK@ 2>/dev/null | grep -q 'Mute: yes' && echo muted", "r");
-    if (fp)
+    glps_thread_mutex_lock(&wifi_mutex);
+    if (wifi_scanning)
     {
-        char state[16];
-        if (fgets(state, sizeof(state), fp))
-        {
-            pclose(fp);
-            return strstr(state, "muted") != NULL;
-        }
-        pclose(fp);
+        glps_thread_mutex_unlock(&wifi_mutex);
+        return;
     }
-    return false;
+    glps_thread_mutex_unlock(&wifi_mutex);
+
+    GooeyList_ClearItems(wifi_list);
+    GooeyList_AddItem(wifi_list, "", "Scanning...");
+
+    gthread_t thread;
+    glps_thread_create(&thread, NULL, wifi_scan_thread, NULL);
+    glps_thread_detach(thread);
 }
 
-void get_current_network()
+static void *connect_to_network_thread(void *arg)
 {
-    FILE *fp = popen("nmcli -t -f NAME connection show --active 2>/dev/null | head -1", "r");
-    if (fp)
+    char *ssid = (char *)arg;
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "nmcli dev wifi connect \"%s\"", ssid);
+    system(cmd);
+    free(ssid);
+    return NULL;
+}
+
+static void connect_to_network_callback(int index)
+{
+    glps_thread_mutex_lock(&wifi_mutex);
+    if (index < 0 || index >= wifi_count)
     {
-        char network[64];
-        if (fgets(network, sizeof(network), fp))
-        {
-            network[strcspn(network, "\n")] = 0;
-            strncpy(settings.current_network, network, sizeof(settings.current_network) - 1);
-        }
-        else
-        {
-            strcpy(settings.current_network, "Not connected");
-        }
-        pclose(fp);
+        glps_thread_mutex_unlock(&wifi_mutex);
+        return;
+    }
+
+    const char *ssid = wifi_ssids[index];
+    if (strcmp(ssid, "<Hidden>") == 0 || strlen(ssid) == 0)
+    {
+        glps_thread_mutex_unlock(&wifi_mutex);
+        return;
+    }
+
+    char *ssid_copy = strdup(ssid);
+    glps_thread_mutex_unlock(&wifi_mutex);
+
+    gthread_t thread;
+    glps_thread_create(&thread, NULL, connect_to_network_thread, ssid_copy);
+    glps_thread_detach(thread);
+}
+
+static void *wifi_toggle_thread(void *arg)
+{
+    bool enabled = *(bool *)arg;
+    free(arg);
+
+    if (enabled)
+    {
+        system("nmcli radio wifi on");
     }
     else
     {
-        strcpy(settings.current_network, "Not connected");
+        system("nmcli radio wifi off");
+    }
+    return NULL;
+}
+
+static void wifi_switch_callback(bool enabled)
+{
+    bool *enabled_ptr = malloc(sizeof(bool));
+    *enabled_ptr = enabled;
+
+    gthread_t thread;
+    glps_thread_create(&thread, NULL, wifi_toggle_thread, enabled_ptr);
+    glps_thread_detach(thread);
+
+    if (enabled)
+    {
+        GooeyWidget_MakeVisible(wifi_list, true);
+        GooeyWidget_MakeVisible(refresh_wifi_btn, true);
+        refresh_wifi_list();
+    }
+    else
+    {
+        GooeyWidget_MakeVisible(wifi_list, false);
+        GooeyWidget_MakeVisible(refresh_wifi_btn, false);
     }
 }
 
-void scan_wifi_networks()
+static bool get_wifi_enabled()
 {
-    if (network_list)
+    FILE *fp = popen("nmcli radio wifi", "r");
+    if (!fp)
+        return false;
+    char state[16] = {0};
+    if (fgets(state, sizeof(state), fp))
     {
-        GooeyList_ClearItems(network_list);
+        pclose(fp);
+        return (strncmp(state, "enabled", 7) == 0);
+    }
+    pclose(fp);
+    return false;
+}
 
-        FILE *fp = popen("nmcli -t -f SSID dev wifi list 2>/dev/null", "r");
-        if (fp)
+static void refresh_button_callback()
+{
+    refresh_wifi_list();
+}
+
+static void *bluetooth_scan_thread(void *arg)
+{
+    glps_thread_mutex_lock(&bt_mutex);
+    bt_scanning = true;
+    bt_count = 0;
+    glps_thread_mutex_unlock(&bt_mutex);
+
+    system("bluetoothctl --timeout 10 scan on > /dev/null 2>&1 &");
+    sleep(1);
+
+    FILE *fp = popen("bluetoothctl devices", "r");
+    if (fp)
+    {
+        char line[256];
+        while (fgets(line, sizeof(line), fp))
         {
-            char ssid[128];
-            int count = 0;
-            while (fgets(ssid, sizeof(ssid), fp) && count < 10)
+            glps_thread_mutex_lock(&bt_mutex);
+            if (bt_count >= MAX_BT_DEVICES)
             {
-                ssid[strcspn(ssid, "\n")] = 0;
-                if (strlen(ssid) > 0)
+                glps_thread_mutex_unlock(&bt_mutex);
+                break;
+            }
+
+            if (strncmp(line, "Device ", 7) == 0)
+            {
+                char address[64] = {0};
+                char name[128] = {0};
+
+                char *addr_start = line + 7;
+                char *addr_end = strchr(addr_start, ' ');
+
+                if (addr_end)
                 {
-                    GooeyList_AddItem(network_list, ssid, "Click to connect");
-                    count++;
+                    size_t addr_len = addr_end - addr_start;
+                    strncpy(address, addr_start, addr_len);
+                    address[addr_len] = '\0';
+
+                    char *name_start = addr_end + 1;
+                    strncpy(name, name_start, sizeof(name) - 1);
+                    name[strcspn(name, "\n")] = 0;
+
+                    char entry[192];
+                    snprintf(entry, sizeof(entry), "%s (%s)",
+                             name[0] ? name : "Unknown Device", address);
+
+                    GooeyList_AddItem(bluetooth_list, "", entry);
+                    strncpy(bt_devices[bt_count], name, sizeof(bt_devices[bt_count]) - 1);
+                    bt_devices[bt_count][sizeof(bt_devices[bt_count]) - 1] = '\0';
+                    strncpy(bt_addresses[bt_count], address, sizeof(bt_addresses[bt_count]) - 1);
+                    bt_addresses[bt_count][sizeof(bt_addresses[bt_count]) - 1] = '\0';
+                    bt_count++;
                 }
             }
-            pclose(fp);
+            glps_thread_mutex_unlock(&bt_mutex);
         }
+        pclose(fp);
+    }
 
-        if (network_list->item_count == 0)
+    system("bluetoothctl scan off > /dev/null 2>&1");
+
+    glps_thread_mutex_lock(&bt_mutex);
+    bt_scanning = false;
+    if (bt_count == 0)
+    {
+        GooeyList_AddItem(bluetooth_list, "", "No devices found");
+    }
+    glps_thread_mutex_unlock(&bt_mutex);
+
+    return NULL;
+}
+
+static void refresh_bluetooth_list()
+{
+    glps_thread_mutex_lock(&bt_mutex);
+    if (bt_scanning)
+    {
+        glps_thread_mutex_unlock(&bt_mutex);
+        return;
+    }
+    glps_thread_mutex_unlock(&bt_mutex);
+
+    GooeyList_ClearItems(bluetooth_list);
+    GooeyList_AddItem(bluetooth_list, "", "Scanning...");
+
+    gthread_t thread;
+    glps_thread_create(&thread, NULL, bluetooth_scan_thread, NULL);
+    glps_thread_detach(thread);
+}
+
+static void *connect_to_bluetooth_thread(void *arg)
+{
+    char *address = (char *)arg;
+    char cmd[256];
+
+    snprintf(cmd, sizeof(cmd), "bluetoothctl trust %s", address);
+    system(cmd);
+
+    snprintf(cmd, sizeof(cmd), "bluetoothctl pair %s", address);
+    system(cmd);
+
+    snprintf(cmd, sizeof(cmd), "bluetoothctl connect %s", address);
+    system(cmd);
+
+    free(address);
+    return NULL;
+}
+
+static void connect_to_bluetooth_callback(int index)
+{
+    glps_thread_mutex_lock(&bt_mutex);
+    if (index < 0 || index >= bt_count)
+    {
+        glps_thread_mutex_unlock(&bt_mutex);
+        return;
+    }
+
+    const char *address = bt_addresses[index-1];
+    if (strlen(address) == 0)
+    {
+        glps_thread_mutex_unlock(&bt_mutex);
+        return;
+    }
+
+    char *addr_copy = strdup(address);
+    glps_thread_mutex_unlock(&bt_mutex);
+
+    gthread_t thread;
+    glps_thread_create(&thread, NULL, connect_to_bluetooth_thread, addr_copy);
+    glps_thread_detach(thread);
+}
+
+static void *bluetooth_toggle_thread(void *arg)
+{
+    bool enabled = *(bool *)arg;
+    free(arg);
+
+    if (enabled)
+    {
+        system("bluetoothctl power on");
+    }
+    else
+    {
+        system("bluetoothctl power off");
+    }
+    return NULL;
+}
+
+static void bluetooth_switch_callback(bool enabled)
+{
+    bool *enabled_ptr = malloc(sizeof(bool));
+    *enabled_ptr = enabled;
+
+    gthread_t thread;
+    glps_thread_create(&thread, NULL, bluetooth_toggle_thread, enabled_ptr);
+    glps_thread_detach(thread);
+
+    if (enabled)
+    {
+        GooeyWidget_MakeVisible(bluetooth_list, true);
+        GooeyWidget_MakeVisible(refresh_bluetooth_btn, true);
+        refresh_bluetooth_list();
+    }
+    else
+    {
+        GooeyWidget_MakeVisible(bluetooth_list, false);
+        GooeyWidget_MakeVisible(refresh_bluetooth_btn, false);
+    }
+}
+
+static bool get_bluetooth_enabled()
+{
+    FILE *fp = popen("bluetoothctl show | grep 'Powered:' | awk '{print $2}'", "r");
+    if (!fp)
+        return false;
+    char state[16] = {0};
+    if (fgets(state, sizeof(state), fp))
+    {
+        pclose(fp);
+        return (strncmp(state, "yes", 3) == 0);
+    }
+    pclose(fp);
+    return false;
+}
+
+static void refresh_bluetooth_button_callback()
+{
+    refresh_bluetooth_list();
+}
+
+static void create_system_ui()
+{
+    int y_ref = 200;
+
+    GooeyImage *gooeyde_logo = GooeyImage_Create("assets/gooeyde_logo.png", 50, y_ref - 128, 128, 128, NULL);
+
+    char hostname[256];
+    gethostname(hostname, sizeof(hostname));
+    GooeyLabel *host_label = GooeyLabel_Create("Hostname:", 0.5f, 50, y_ref + 60);
+    GooeyLabel *host_value = GooeyLabel_Create(hostname, 0.5f, 200, y_ref + 60);
+
+    char *username = getenv("USER");
+    GooeyLabel *user_label = GooeyLabel_Create("Username:", 0.5f, 50, y_ref + 100);
+    GooeyLabel *user_value = GooeyLabel_Create(username ? username : "Unknown", 0.5f, 200, y_ref + 100);
+
+    FILE *fp = fopen("/etc/os-release", "r");
+    char os_name[256] = "Unknown";
+    if (fp)
+    {
+        char line[256];
+        while (fgets(line, sizeof(line), fp))
         {
-            GooeyList_AddItem(network_list, "No networks found", "Enable Wi-Fi to scan");
+            if (strncmp(line, "PRETTY_NAME=", 12) == 0)
+            {
+                char *start = strchr(line, '\"');
+                char *end = strrchr(line, '\"');
+                if (start && end && end > start)
+                {
+                    size_t len = end - start - 1;
+                    strncpy(os_name, start + 1, len);
+                    os_name[len] = '\0';
+                }
+                break;
+            }
         }
-
-        GooeyList_ShowSeparator(network_list, true);
+        fclose(fp);
     }
-}
+    GooeyLabel *os_label = GooeyLabel_Create("OS:", 0.5f, 50, y_ref + 140);
+    GooeyLabel *os_value = GooeyLabel_Create(os_name, 0.5f, 200, y_ref + 140);
 
-void init_system_settings()
-{
-
-    long current_bright = get_system_brightness();
-    long max_bright = get_max_brightness();
-    settings.brightness_level = (current_bright * 100) / max_bright;
-
-    settings.volume_level = get_system_volume();
-
-    settings.wifi_enabled = get_system_wifi_state();
-
-    settings.bluetooth_enabled = get_system_bluetooth_state();
-
-    get_current_network();
-
-    printf("System settings initialized:\n");
-    printf("  Brightness: %ld%%\n", settings.brightness_level);
-    printf("  Volume: %ld%%\n", settings.volume_level);
-    printf("  WiFi: %s\n", settings.wifi_enabled ? "Enabled" : "Disabled");
-    printf("  Bluetooth: %s\n", settings.bluetooth_enabled ? "Enabled" : "Disabled");
-    printf("  Network: %s\n", settings.current_network);
-}
-
-void on_wifi_toggled(bool state)
-{
-    settings.wifi_enabled = state;
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "nmcli radio wifi %s", state ? "on" : "off");
-    execute_system_command(cmd);
-    printf("Wi-Fi %s\n", state ? "Enabled" : "Disabled");
-
-    if (state)
+    char cpu_model[256] = "Unknown";
+    fp = fopen("/proc/cpuinfo", "r");
+    if (fp)
     {
-
-        scan_wifi_networks();
+        char line[256];
+        while (fgets(line, sizeof(line), fp))
+        {
+            if (strncmp(line, "model name", 10) == 0)
+            {
+                char *colon = strchr(line, ':');
+                if (colon)
+                {
+                    strncpy(cpu_model, colon + 2, sizeof(cpu_model) - 1);
+                    cpu_model[strcspn(cpu_model, "\n")] = 0;
+                }
+                break;
+            }
+        }
+        fclose(fp);
     }
-}
+    GooeyLabel *cpu_label = GooeyLabel_Create("CPU:", 0.5f, 50, y_ref + 180);
+    GooeyLabel *cpu_value = GooeyLabel_Create(cpu_model, 0.5f, 200, y_ref + 180);
 
-void on_bluetooth_toggled(bool state)
-{
-    settings.bluetooth_enabled = state;
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "bluetoothctl power %s", state ? "on" : "off");
-    execute_system_command(cmd);
-    printf("Bluetooth %s\n", state ? "Enabled" : "Disabled");
-}
-
-void on_brightness_changed(long value)
-{
-    settings.brightness_level = value;
-    long max_bright = get_max_brightness();
-    long actual_level = (value * max_bright) / 100;
-
-    char cmd[128];
-    snprintf(cmd, sizeof(cmd), "echo %ld | sudo tee /sys/class/backlight/*/brightness >/dev/null 2>&1", actual_level);
-    execute_system_command(cmd);
-    printf("Brightness set to: %ld%%\n", value);
-}
-
-void on_volume_changed(long value)
-{
-    settings.volume_level = value;
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "pactl set-sink-volume @DEFAULT_SINK@ %ld%%", value);
-    execute_system_command(cmd);
-    printf("Volume set to: %ld%%\n", value);
-}
-
-void on_mute_toggled(bool state)
-{
-    execute_system_command("pactl set-sink-mute @DEFAULT_SINK@ toggle");
-    printf("Audio %s\n", state ? "Unmuted" : "Muted");
-}
-
-void on_network_selected(int index)
-{
-    if (network_list && settings.wifi_enabled)
+    char ram_info[64] = "Unknown";
+    fp = fopen("/proc/meminfo", "r");
+    if (fp)
     {
-        printf("Connecting to network index: %d\n", index);
+        char line[256];
+        while (fgets(line, sizeof(line), fp))
+        {
+            if (strncmp(line, "MemTotal:", 9) == 0)
+            {
+                char *mem = line + 9;
+                while (*mem == ' ')
+                    mem++;
+                long kb = atol(mem);
+                snprintf(ram_info, sizeof(ram_info), "%.2f GB", kb / 1024.0 / 1024.0);
+                break;
+            }
+        }
+        fclose(fp);
     }
+    GooeyLabel *ram_label = GooeyLabel_Create("RAM:", 0.5f, 50, y_ref + 220);
+    GooeyLabel *ram_value = GooeyLabel_Create(ram_info, 0.5f, 200, y_ref + 220);
+
+    GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)gooeyde_logo);
+    GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)host_label);
+    GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)host_value);
+    GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)user_label);
+    GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)user_value);
+    GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)os_label);
+    GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)os_value);
+    GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)cpu_label);
+    GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)cpu_value);
+    GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)ram_label);
+    GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)ram_value);
 }
 
-void on_about_clicked()
+static void create_network_ui()
 {
-    printf("Linux Settings App - Controls real system settings\n");
-}
+    int y_ref = 50;
 
-void on_save_clicked()
-{
-    printf("All settings applied to system!\n");
-}
+    GooeyLabel *wifi_label = GooeyLabel_Create("Wi-Fi:", 0.5f, 50, y_ref + 10);
+    bool wifi_enabled = get_wifi_enabled();
+    wifi_switch = GooeySwitch_Create(150, y_ref - 15, wifi_enabled, 0, wifi_switch_callback);
 
-void on_refresh_clicked()
-{
-    printf("Refreshing settings from system...\n");
-    init_system_settings();
+    refresh_wifi_btn = GooeyButton_Create("Refresh", 250, y_ref - 20, 100, 40, refresh_button_callback);
 
-    if (wifi_switch && GooeySwitch_GetState(wifi_switch) != settings.wifi_enabled)
+    GooeyTabs_AddWidget(win, settings_tabs, 1, (GooeyWidget *)wifi_label);
+    GooeyTabs_AddWidget(win, settings_tabs, 1, (GooeyWidget *)wifi_switch);
+    GooeyTabs_AddWidget(win, settings_tabs, 1, (GooeyWidget *)refresh_wifi_btn);
+
+    wifi_list = GooeyList_Create(0, y_ref + 40, 650, 510, connect_to_network_callback);
+
+    if (wifi_enabled)
     {
-        GooeySwitch_Toggle(wifi_switch);
+        GooeyWidget_MakeVisible(wifi_list, true);
+        GooeyWidget_MakeVisible(refresh_wifi_btn, true);
+        refresh_wifi_list();
     }
-    if (bluetooth_switch && GooeySwitch_GetState(bluetooth_switch) != settings.bluetooth_enabled)
+    else
     {
-        GooeySwitch_Toggle(bluetooth_switch);
+        GooeyList_AddItem(wifi_list, "", "Wi-Fi is disabled");
+        GooeyWidget_MakeVisible(wifi_list, false);
+        GooeyWidget_MakeVisible(refresh_wifi_btn, false);
     }
-    if (brightness_slider)
+
+    GooeyTabs_AddWidget(win, settings_tabs, 1, (GooeyWidget *)wifi_list);
+}
+
+static void create_bluetooth_ui()
+{
+    int y_ref = 50;
+
+    GooeyLabel *bt_label = GooeyLabel_Create("Bluetooth:", 0.5f, 50, y_ref + 10);
+    bool bt_enabled = get_bluetooth_enabled();
+    bluetooth_switch = GooeySwitch_Create(200, y_ref - 15, bt_enabled, 0, bluetooth_switch_callback);
+
+    refresh_bluetooth_btn = GooeyButton_Create("Scan", 300, y_ref - 20, 100, 40, refresh_bluetooth_button_callback);
+
+    GooeyTabs_AddWidget(win, settings_tabs, 2, (GooeyWidget *)bt_label);
+    GooeyTabs_AddWidget(win, settings_tabs, 2, (GooeyWidget *)bluetooth_switch);
+    GooeyTabs_AddWidget(win, settings_tabs, 2, (GooeyWidget *)refresh_bluetooth_btn);
+
+    bluetooth_list = GooeyList_Create(0, y_ref + 40, 650, 510, connect_to_bluetooth_callback);
+
+    if (bt_enabled)
     {
-        brightness_slider->value = settings.brightness_level;
+        GooeyWidget_MakeVisible(bluetooth_list, true);
+        GooeyWidget_MakeVisible(refresh_bluetooth_btn, true);
+        refresh_bluetooth_list();
     }
-    if (volume_slider)
+    else
     {
-        volume_slider->value = settings.volume_level;
-    }
-    if (mute_switch && GooeySwitch_GetState(mute_switch) != get_system_mute_state())
-    {
-        GooeySwitch_Toggle(mute_switch);
+        GooeyList_AddItem(bluetooth_list, "", "Bluetooth is disabled");
+        GooeyWidget_MakeVisible(bluetooth_list, false);
+        GooeyWidget_MakeVisible(refresh_bluetooth_btn, false);
     }
 
-    scan_wifi_networks();
-    get_current_network();
+    GooeyTabs_AddWidget(win, settings_tabs, 2, (GooeyWidget *)bluetooth_list);
 }
 
-void create_section_header(const char *text, int x, int y)
-{
-
-    GooeyButton_Create(text, x, y, 300, 25, NULL);
-}
-
-void create_modern_toggle(const char *label, int x, int y, GooeySwitch **switch_ptr, bool initial_state, void (*callback)(bool))
-{
-    create_section_header(label, x, y);
-    *switch_ptr = GooeySwitch_Create(x + 320, y, initial_state, true, callback);
-}
-
-void create_modern_slider(const char *label, int x, int y, GooeySlider **slider_ptr, long initial_value, void (*callback)(long))
-{
-    create_section_header(label, x, y);
-    *slider_ptr = GooeySlider_Create(x, y + 35, 400, 0, 100, true, callback);
-    (*slider_ptr)->value = initial_value;
-
-    char value_text[32];
-    snprintf(value_text, sizeof(value_text), "%ld%%", initial_value);
-    GooeyButton_Create(value_text, x + 420, y + 35, 60, 25, NULL);
-}
-
-void create_network_tab(GooeyWindow *win, GooeyTabs *tabs)
-{
-    int y_pos = 40;
-
-    create_section_header("CONNECTIVITY", 50, y_pos);
-    y_pos += 40;
-
-    create_modern_toggle("Wi-Fi", 50, y_pos, &wifi_switch, settings.wifi_enabled, on_wifi_toggled);
-    y_pos += 60;
-
-    create_modern_toggle("Bluetooth", 50, y_pos, &bluetooth_switch, settings.bluetooth_enabled, on_bluetooth_toggled);
-    y_pos += 80;
-
-    create_section_header("AVAILABLE NETWORKS", 50, y_pos);
-    y_pos += 30;
-
-    network_list = GooeyList_Create(50, y_pos, 500, 200, on_network_selected);
-    scan_wifi_networks();
-    y_pos += 220;
-
-    GooeyButton_Create("⟳ Refresh", 50, y_pos, 120, 35, on_refresh_clicked);
-
-    GooeyTabs_AddWidget(win, tabs, 0, wifi_switch);
-    GooeyTabs_AddWidget(win, tabs, 0, bluetooth_switch);
-    GooeyTabs_AddWidget(win, tabs, 0, network_list);
-}
-
-void create_display_tab(GooeyWindow *win, GooeyTabs *tabs)
-{
-    int y_pos = 40;
-
-    create_section_header("DISPLAY SETTINGS", 50, y_pos);
-    y_pos += 40;
-
-    create_modern_slider("SCREEN BRIGHTNESS", 50, y_pos, &brightness_slider, settings.brightness_level, on_brightness_changed);
-    y_pos += 100;
-
-    create_section_header("NIGHT LIGHT", 50, y_pos);
-    y_pos += 30;
-    GooeySwitch *night_light = GooeySwitch_Create(50, y_pos, false, true, NULL);
-    y_pos += 60;
-
-    create_section_header("AUTO ROTATE", 50, y_pos);
-    y_pos += 30;
-    GooeySwitch *auto_rotate = GooeySwitch_Create(50, y_pos, true, true, NULL);
-
-    GooeyTabs_AddWidget(win, tabs, 1, brightness_slider);
-    GooeyTabs_AddWidget(win, tabs, 1, night_light);
-    GooeyTabs_AddWidget(win, tabs, 1, auto_rotate);
-}
-
-void create_sound_tab(GooeyWindow *win, GooeyTabs *tabs)
-{
-    int y_pos = 40;
-
-    create_section_header("SOUND SETTINGS", 50, y_pos);
-    y_pos += 40;
-
-    create_modern_slider("SYSTEM VOLUME", 50, y_pos, &volume_slider, settings.volume_level, on_volume_changed);
-    y_pos += 100;
-
-    create_modern_toggle("MUTE AUDIO", 50, y_pos, &mute_switch, get_system_mute_state(), on_mute_toggled);
-    y_pos += 80;
-
-    create_section_header("SOUND EFFECTS", 50, y_pos);
-    y_pos += 30;
-    GooeySwitch *sound_effects = GooeySwitch_Create(50, y_pos, true, true, NULL);
-    y_pos += 60;
-
-    create_section_header("INPUT VOLUME", 50, y_pos);
-    y_pos += 35;
-    GooeySlider *input_volume = GooeySlider_Create(50, y_pos, 400, 0, 100, true, NULL);
-    input_volume->value = 75;
-    GooeyButton_Create("75%", 470, y_pos, 60, 25, NULL);
-
-    GooeyTabs_AddWidget(win, tabs, 2, volume_slider);
-    GooeyTabs_AddWidget(win, tabs, 2, mute_switch);
-    GooeyTabs_AddWidget(win, tabs, 2, sound_effects);
-    GooeyTabs_AddWidget(win, tabs, 2, input_volume);
-}
-
-void create_system_tab(GooeyWindow *win, GooeyTabs *tabs)
-{
-    int y_pos = 40;
-
-    create_section_header("SYSTEM INFORMATION", 50, y_pos);
-    y_pos += 40;
-
-    GooeyList *system_list = GooeyList_Create(50, y_pos, 500, 180, NULL);
-    GooeyList_AddItem(system_list, "Current Network", settings.current_network);
-    GooeyList_AddItem(system_list, "Brightness Level", "Adjust in Display tab");
-    GooeyList_AddItem(system_list, "Volume Level", "Adjust in Sound tab");
-    GooeyList_AddItem(system_list, "Wi-Fi Status", settings.wifi_enabled ? "Enabled" : "Disabled");
-    GooeyList_AddItem(system_list, "Bluetooth Status", settings.bluetooth_enabled ? "Enabled" : "Disabled");
-    GooeyList_ShowSeparator(system_list, true);
-    y_pos += 200;
-
-    create_section_header("SYSTEM CONTROLS", 50, y_pos);
-    y_pos += 40;
-
-    GooeyButton_Create("ℹ️ About", 50, y_pos, 140, 45, on_about_clicked);
-    GooeyButton_Create("⟳ Refresh All", 210, y_pos, 140, 45, on_refresh_clicked);
-    GooeyButton_Create("💾 Apply", 370, y_pos, 140, 45, on_save_clicked);
-    y_pos += 65;
-
-    create_section_header("POWER MANAGEMENT", 50, y_pos);
-    y_pos += 40;
-
-    GooeyButton_Create("🔄 Restart", 50, y_pos, 120, 40, NULL);
-    GooeyButton_Create("⏻ Shutdown", 190, y_pos, 120, 40, NULL);
-    GooeyButton_Create("🌙 Suspend", 330, y_pos, 120, 40, NULL);
-
-    GooeyTabs_AddWidget(win, tabs, 3, system_list);
-}
-
-int main()
+int main(int argc, char **argv)
 {
     Gooey_Init();
 
-    init_system_settings();
+    glps_thread_mutex_init(&wifi_mutex, NULL);
+    glps_thread_mutex_init(&bt_mutex, NULL);
 
-    GooeyWindow *win = GooeyWindow_Create("⚙️ Linux System Settings", 900, 700, true);
+    ScreenInfo screen_info = get_screen_resolution();
 
-    GooeyTabs *tabs = GooeyTabs_Create(0, 0, 900, 700, false);
+    win = GooeyWindow_Create("Gooey Settings", 800, 600, true);
+    GooeyTheme *dark_mode = GooeyTheme_LoadFromFile("assets/dark.json");
+    GooeyWindow_SetTheme(win, dark_mode);
+    if (!win)
+    {
+        fprintf(stderr, "Failed to create main window\n");
+        glps_thread_mutex_destroy(&wifi_mutex);
+        glps_thread_mutex_destroy(&bt_mutex);
+        return 1;
+    }
 
-    GooeyTabs_InsertTab(tabs, "🌐 Network");
-    GooeyTabs_InsertTab(tabs, "🖥️ Display");
-    GooeyTabs_InsertTab(tabs, "🔊 Sound");
-    GooeyTabs_InsertTab(tabs, "⚙️ System");
+    win->vk = NULL;
 
-    create_network_tab(win, tabs);
-    create_display_tab(win, tabs);
-    create_sound_tab(win, tabs);
-    create_system_tab(win, tabs);
+    settings_tabs = GooeyTabs_Create(0, 0, 800, 600, true);
+    GooeyTabs_Sidebar_Open(settings_tabs);
 
-    GooeyTabs_SetActiveTab(tabs, 0);
+    GooeyTabs_InsertTab(settings_tabs, "System");
+    GooeyTabs_InsertTab(settings_tabs, "Wi-Fi");
+    GooeyTabs_InsertTab(settings_tabs, "Bluetooth");
 
-    printf("Linux Settings App Started\n");
-    printf("Note: Some operations may require sudo permissions\n");
+    GooeyWindow_RegisterWidget(win, (GooeyWidget *)settings_tabs);
+
+    create_system_ui();
+    create_network_ui();
+    create_bluetooth_ui();
 
     GooeyWindow_Run(1, win);
+
     GooeyWindow_Cleanup(1, win);
+    glps_thread_mutex_destroy(&wifi_mutex);
+    glps_thread_mutex_destroy(&bt_mutex);
 
     return 0;
 }

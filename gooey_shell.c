@@ -6,6 +6,7 @@
 #include <X11/extensions/Xrandr.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -14,9 +15,11 @@
 #include <signal.h>
 #include <stdarg.h>
 
-
-
 static PrecomputedAtoms atoms;
+
+static Window *opened_windows = NULL;
+static int opened_windows_count = 0;
+static int opened_windows_capacity = 0;
 
 static void InitializeAtoms(Display *display);
 static int InitializeMultiMonitor(GooeyShellState *state);
@@ -33,6 +36,7 @@ static WindowNode *FindWindowNodeByClient(GooeyShellState *state, Window client)
 static void CloseWindow(GooeyShellState *state, WindowNode *node);
 static void ToggleFullscreen(GooeyShellState *state, WindowNode *node);
 static void MinimizeWindow(GooeyShellState *state, WindowNode *node);
+static void RestoreWindow(GooeyShellState *state, WindowNode *node);
 static int GetTitleBarButtonArea(GooeyShellState *state, WindowNode *node, int x, int y);
 static int GetResizeBorderArea(GooeyShellState *state, WindowNode *node, int x, int y);
 static void UpdateWindowGeometry(GooeyShellState *state, WindowNode *node);
@@ -52,6 +56,14 @@ static char *StrDup(const char *str);
 static void SafeXFree(void *data);
 static int ValidateWindowState(GooeyShellState *state);
 static void LogError(const char *message, ...);
+static void LogInfo(const char *message, ...);
+static void AddToOpenedWindows(Window window);
+static void RemoveFromOpenedWindows(Window window);
+static int IsWindowInOpenedWindows(Window window);
+static void SendWindowListThroughDBus(GooeyShellState *state);
+static void SendWindowStateThroughDBus(GooeyShellState *state, Window window, const char *st);
+static int ShouldExcludeFromTaskbar(GooeyShellState *state, WindowNode *node);
+static void HandleDBusWindowCommand(GooeyShellState *state, DBusMessage *msg);
 
 static void LogError(const char *message, ...)
 {
@@ -79,6 +91,392 @@ static void SafeXFree(void *data)
         XFree(data);
 }
 
+static void SetupDBUS(GooeyShellState *state)
+{
+    int ret;
+
+    dbus_error_init(&state->dbus_error);
+    state->dbus_connection = dbus_bus_get(DBUS_BUS_SESSION, &state->dbus_error);
+    if (dbus_error_is_set(&state->dbus_error))
+    {
+        LogInfo("DBus Error: %s", state->dbus_error.message);
+        dbus_error_free(&state->dbus_error);
+    }
+    if (!state->dbus_connection)
+    {
+        LogInfo("Failed to get DBus connection");
+        return;
+    }
+
+    ret = dbus_bus_request_name(state->dbus_connection, "dev.binaryink.gshell", DBUS_NAME_FLAG_REPLACE_EXISTING, &state->dbus_error);
+    if (dbus_error_is_set(&state->dbus_error))
+    {
+        LogInfo("DBus Error: %s", state->dbus_error.message);
+        dbus_error_free(&state->dbus_error);
+    }
+    if (ret != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER)
+    {
+        LogInfo("Failed to acquire DBus name");
+        return;
+    }
+
+    state->is_dbus_init = true;
+    LogInfo("DBus initialized successfully");
+}
+
+static int ShouldExcludeFromTaskbar(GooeyShellState *state, WindowNode *node)
+{
+    if (!node)
+        return 0;
+
+    if (node->is_desktop_app)
+    {
+        return 1;
+    }
+
+    if (node->is_fullscreen_app)
+    {
+
+        if (node->title)
+        {
+            char lower_title[256];
+            for (int i = 0; node->title[i] && i < 255; i++)
+            {
+                lower_title[i] = tolower(node->title[i]);
+            }
+            lower_title[strlen(node->title) < 255 ? strlen(node->title) : 255] = '\0';
+
+            if (strstr(lower_title, "menu") ||
+                strstr(lower_title, "launcher") ||
+                strstr(lower_title, "app menu") ||
+                strstr(lower_title, "application menu") ||
+                strstr(lower_title, "gooeyde_appmenu"))
+            {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static void SendWindowListThroughDBus(GooeyShellState *state)
+{
+    if (!state->dbus_connection || !state->is_dbus_init)
+    {
+        return;
+    }
+
+    DBusMessage *message;
+    DBusMessageIter args, array_iter;
+    char window_id[64];
+    int i;
+    int visible_windows_count = 0;
+
+    for (i = 0; i < opened_windows_count; i++)
+    {
+        WindowNode *node = FindWindowNodeByFrame(state, opened_windows[i]);
+        if (node && !ShouldExcludeFromTaskbar(state, node))
+        {
+            visible_windows_count++;
+        }
+    }
+
+    message = dbus_message_new_signal("/dev/binaryink/gshell",
+                                      "dev.binaryink.gshell",
+                                      "WindowListUpdated");
+    if (!message)
+    {
+        LogError("Failed to create DBus message");
+        return;
+    }
+
+    dbus_message_iter_init_append(message, &args);
+
+    if (!dbus_message_iter_open_container(&args, DBUS_TYPE_ARRAY,
+                                          DBUS_TYPE_STRING_AS_STRING,
+                                          &array_iter))
+    {
+        LogError("Failed to open array container");
+        dbus_message_unref(message);
+        return;
+    }
+
+    for (i = 0; i < opened_windows_count; i++)
+    {
+        WindowNode *node = FindWindowNodeByFrame(state, opened_windows[i]);
+        if (node && !ShouldExcludeFromTaskbar(state, node))
+        {
+            snprintf(window_id, sizeof(window_id), "%lu", opened_windows[i]);
+            const char *window_str = window_id;
+
+            if (!dbus_message_iter_append_basic(&array_iter, DBUS_TYPE_STRING, &window_str))
+            {
+                LogError("Failed to append window to array");
+                break;
+            }
+        }
+    }
+
+    if (!dbus_message_iter_close_container(&args, &array_iter))
+    {
+        LogError("Failed to close array container");
+        dbus_message_unref(message);
+        return;
+    }
+
+    if (!dbus_connection_send(state->dbus_connection, message, NULL))
+    {
+        LogError("Failed to send DBus message");
+    }
+    else
+    {
+        dbus_connection_flush(state->dbus_connection);
+        LogInfo("Sent window list through DBus (%d windows, %d visible)", opened_windows_count, visible_windows_count);
+    }
+
+    dbus_message_unref(message);
+}
+
+static void SendWindowStateThroughDBus(GooeyShellState *state, Window window, const char *state_str)
+{
+    if (!state->dbus_connection || !state->is_dbus_init)
+    {
+        return;
+    }
+
+    DBusMessage *message;
+    DBusMessageIter args;
+    char window_id[64];
+
+    message = dbus_message_new_signal("/dev/binaryink/gshell",
+                                      "dev.binaryink.gshell",
+                                      "WindowStateChanged");
+    if (!message)
+    {
+        LogError("Failed to create DBus message");
+        return;
+    }
+
+    dbus_message_iter_init_append(message, &args);
+
+    snprintf(window_id, sizeof(window_id), "%lu", window);
+    const char *window_str = window_id;
+    if (!dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &window_str))
+    {
+        LogError("Failed to append window ID");
+        dbus_message_unref(message);
+        return;
+    }
+
+    if (!dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &state_str))
+    {
+        LogError("Failed to append window state");
+        dbus_message_unref(message);
+        return;
+    }
+
+    if (!dbus_connection_send(state->dbus_connection, message, NULL))
+    {
+        LogError("Failed to send DBus message");
+    }
+    else
+    {
+        dbus_connection_flush(state->dbus_connection);
+        LogInfo("Sent window state through DBus: window %lu -> %s", window, state_str);
+    }
+
+    dbus_message_unref(message);
+}
+
+static void HandleDBusWindowCommand(GooeyShellState *state, DBusMessage *msg)
+{
+    if (!state || !msg)
+        return;
+
+    const char *method = dbus_message_get_member(msg);
+    if (!method)
+        return;
+
+    DBusMessageIter iter;
+    if (!dbus_message_iter_init(msg, &iter))
+    {
+        LogError("No arguments in DBus method call");
+        return;
+    }
+
+    const char *window_id_str = NULL;
+    const char *command = NULL;
+
+    if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_STRING)
+    {
+        dbus_message_iter_get_basic(&iter, &window_id_str);
+        dbus_message_iter_next(&iter);
+    }
+
+    if (strcmp(method, "SendWindowCommand") == 0)
+    {
+        if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_STRING)
+        {
+            dbus_message_iter_get_basic(&iter, &command);
+        }
+    }
+
+    if (!window_id_str)
+    {
+        LogError("No window ID in DBus command");
+        return;
+    }
+
+    Window window = (Window)strtoul(window_id_str, NULL, 10);
+    if (window == 0)
+    {
+        LogError("Invalid window ID: %s", window_id_str);
+        return;
+    }
+
+    WindowNode *node = FindWindowNodeByFrame(state, window);
+    if (!node)
+    {
+        LogError("Window not found: %lu", window);
+        return;
+    }
+
+    if (strcmp(method, "MinimizeWindow") == 0)
+    {
+        LogInfo("DBus: Minimizing window %lu", window);
+        MinimizeWindow(state, node);
+    }
+    else if (strcmp(method, "RestoreWindow") == 0)
+    {
+        LogInfo("DBus: Restoring window %lu", window);
+        RestoreWindow(state, node);
+    }
+    else if (strcmp(method, "CloseWindow") == 0)
+    {
+        LogInfo("DBus: Closing window %lu", window);
+        CloseWindow(state, node);
+    }
+    else if (strcmp(method, "SendWindowCommand") == 0 && command)
+    {
+        LogInfo("DBus: Sending command '%s' to window %lu", command, window);
+        if (strcmp(command, "minimize") == 0)
+        {
+            MinimizeWindow(state, node);
+        }
+        else if (strcmp(command, "restore") == 0)
+        {
+            RestoreWindow(state, node);
+        }
+        else if (strcmp(command, "close") == 0)
+        {
+            CloseWindow(state, node);
+        }
+        else
+        {
+            LogError("Unknown window command: %s", command);
+        }
+    }
+    else
+    {
+        LogError("Unknown DBus method: %s", method);
+    }
+
+    DBusMessage *reply = dbus_message_new_method_return(msg);
+    if (reply)
+    {
+        dbus_connection_send(state->dbus_connection, reply, NULL);
+        dbus_connection_flush(state->dbus_connection);
+        dbus_message_unref(reply);
+    }
+}
+
+static void ListenForDBUSSignals(GooeyShellState *state)
+{
+    if (!state->dbus_connection || !state->is_dbus_init)
+    {
+        return;
+    }
+
+    dbus_bus_add_match(state->dbus_connection,
+                       "type='method_call',interface='dev.binaryink.gshell'",
+                       &state->dbus_error);
+
+    if (dbus_error_is_set(&state->dbus_error))
+    {
+        LogInfo("DBus Error adding match: %s", state->dbus_error.message);
+        dbus_error_free(&state->dbus_error);
+    }
+
+    while (1)
+    {
+        dbus_connection_read_write(state->dbus_connection, 0);
+        DBusMessage *msg = dbus_connection_pop_message(state->dbus_connection);
+        if (!msg)
+        {
+            usleep(100000);
+            continue;
+        }
+
+        if (dbus_message_is_method_call(msg, "dev.binaryink.gshell", "GetWindowList"))
+        {
+            DBusMessage *reply = dbus_message_new_method_return(msg);
+            DBusMessageIter args, array_iter;
+            char window_id[64];
+            int i;
+
+            dbus_message_iter_init_append(reply, &args);
+
+            dbus_message_iter_open_container(&args, DBUS_TYPE_ARRAY,
+                                             DBUS_TYPE_STRING_AS_STRING,
+                                             &array_iter);
+
+            for (i = 0; i < opened_windows_count; i++)
+            {
+                WindowNode *node = FindWindowNodeByFrame(state, opened_windows[i]);
+                if (node && !ShouldExcludeFromTaskbar(state, node))
+                {
+                    snprintf(window_id, sizeof(window_id), "%lu", opened_windows[i]);
+                    const char *window_str = window_id;
+                    dbus_message_iter_append_basic(&array_iter, DBUS_TYPE_STRING, &window_str);
+                }
+            }
+
+            dbus_message_iter_close_container(&args, &array_iter);
+
+            dbus_connection_send(state->dbus_connection, reply, NULL);
+            dbus_connection_flush(state->dbus_connection);
+            dbus_message_unref(reply);
+
+            LogInfo("Sent window list in response to GetWindowList");
+        }
+        else if (dbus_message_is_method_call(msg, "dev.binaryink.gshell", "MinimizeWindow") ||
+                 dbus_message_is_method_call(msg, "dev.binaryink.gshell", "RestoreWindow") ||
+                 dbus_message_is_method_call(msg, "dev.binaryink.gshell", "CloseWindow") ||
+                 dbus_message_is_method_call(msg, "dev.binaryink.gshell", "SendWindowCommand"))
+        {
+            HandleDBusWindowCommand(state, msg);
+        }
+        else if (dbus_message_is_method_call(msg, "dev.binaryink.gshell", "NotifyWindowOpened"))
+        {
+            const char *window_id;
+            DBusMessageIter args;
+            dbus_message_iter_init(msg, &args);
+            if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&args))
+            {
+                dbus_message_iter_get_basic(&args, &window_id);
+                printf("Window opened: %s\n", window_id);
+            }
+
+            DBusMessage *reply = dbus_message_new_method_return(msg);
+            dbus_connection_send(state->dbus_connection, reply, NULL);
+            dbus_message_unref(reply);
+        }
+
+        dbus_message_unref(msg);
+    }
+}
+
 static int ValidateWindowState(GooeyShellState *state)
 {
     if (!state || !state->display)
@@ -87,6 +485,55 @@ static int ValidateWindowState(GooeyShellState *state)
         return 0;
     }
     return 1;
+}
+
+static void AddToOpenedWindows(Window window)
+{
+    if (opened_windows_count >= opened_windows_capacity)
+    {
+        int new_capacity = opened_windows_capacity == 0 ? 16 : opened_windows_capacity * 2;
+        Window *new_array = realloc(opened_windows, new_capacity * sizeof(Window));
+        if (!new_array)
+        {
+            LogError("Failed to realloc opened_windows array");
+            return;
+        }
+        opened_windows = new_array;
+        opened_windows_capacity = new_capacity;
+    }
+
+    opened_windows[opened_windows_count++] = window;
+    LogInfo("Added window %lu to opened_windows array (count: %d)", window, opened_windows_count);
+}
+
+static void RemoveFromOpenedWindows(Window window)
+{
+    for (int i = 0; i < opened_windows_count; i++)
+    {
+        if (opened_windows[i] == window)
+        {
+
+            for (int j = i; j < opened_windows_count - 1; j++)
+            {
+                opened_windows[j] = opened_windows[j + 1];
+            }
+            opened_windows_count--;
+            LogInfo("Removed window %lu from opened_windows array (count: %d)", window, opened_windows_count);
+            return;
+        }
+    }
+}
+
+static int IsWindowInOpenedWindows(Window window)
+{
+    for (int i = 0; i < opened_windows_count; i++)
+    {
+        if (opened_windows[i] == window)
+        {
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static void InitializeAtoms(Display *display)
@@ -108,6 +555,7 @@ static void InitializeAtoms(Display *display)
     atoms.net_wm_state_skip_taskbar = XInternAtom(display, "_NET_WM_STATE_SKIP_TASKBAR", False);
     atoms.net_wm_state_skip_pager = XInternAtom(display, "_NET_WM_STATE_SKIP_PAGER", False);
     atoms.net_wm_state_sticky = XInternAtom(display, "_NET_WM_STATE_STICKY", False);
+    atoms.net_wm_state_hidden = XInternAtom(display, "_NET_WM_STATE_HIDDEN", False);
     atoms.gooey_fullscreen_app = XInternAtom(display, "GOOEY_FULLSCREEN_APP", False);
     atoms.gooey_stay_on_top = XInternAtom(display, "GOOEY_STAY_ON_TOP", False);
     atoms.gooey_desktop_app = XInternAtom(display, "GOOEY_DESKTOP_APP", False);
@@ -115,23 +563,25 @@ static void InitializeAtoms(Display *display)
 
 static int InitializeMultiMonitor(GooeyShellState *state)
 {
-    if (!ValidateWindowState(state)) return 0;
+    if (!ValidateWindowState(state))
+        return 0;
 
     int event_base, error_base;
-    if (!XRRQueryExtension(state->display, &event_base, &error_base)) {
+    if (!XRRQueryExtension(state->display, &event_base, &error_base))
+    {
         LogInfo("XRandR extension not available, using single monitor");
-        // Fallback to single monitor
+
         state->monitor_info.monitors = malloc(sizeof(Monitor));
         state->monitor_info.num_monitors = 1;
         state->monitor_info.primary_monitor = 0;
-        
+
         state->monitor_info.monitors[0].x = 0;
         state->monitor_info.monitors[0].y = 0;
         state->monitor_info.monitors[0].width = DisplayWidth(state->display, state->screen);
         state->monitor_info.monitors[0].height = DisplayHeight(state->display, state->screen);
         state->monitor_info.monitors[0].number = 0;
-        
-        LogInfo("Single monitor: %dx%d at %d,%d", 
+
+        LogInfo("Single monitor: %dx%d at %d,%d",
                 state->monitor_info.monitors[0].width,
                 state->monitor_info.monitors[0].height,
                 state->monitor_info.monitors[0].x,
@@ -140,7 +590,8 @@ static int InitializeMultiMonitor(GooeyShellState *state)
     }
 
     XRRScreenResources *resources = XRRGetScreenResources(state->display, state->root);
-    if (!resources) {
+    if (!resources)
+    {
         LogError("Failed to get screen resources");
         return 0;
     }
@@ -149,50 +600,57 @@ static int InitializeMultiMonitor(GooeyShellState *state)
     state->monitor_info.num_monitors = 0;
     state->monitor_info.primary_monitor = 0;
 
-    for (int i = 0; i < resources->noutput; i++) {
+    for (int i = 0; i < resources->noutput; i++)
+    {
         XRROutputInfo *output_info = XRRGetOutputInfo(state->display, resources, resources->outputs[i]);
-        if (!output_info || output_info->connection != RR_Connected) {
-            if (output_info) XRRFreeOutputInfo(output_info);
+        if (!output_info || output_info->connection != RR_Connected)
+        {
+            if (output_info)
+                XRRFreeOutputInfo(output_info);
             continue;
         }
 
-        if (output_info->crtc) {
+        if (output_info->crtc)
+        {
             XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(state->display, resources, output_info->crtc);
-            if (crtc_info && crtc_info->width > 0 && crtc_info->height > 0) {
+            if (crtc_info && crtc_info->width > 0 && crtc_info->height > 0)
+            {
                 Monitor *mon = &state->monitor_info.monitors[state->monitor_info.num_monitors];
                 mon->x = crtc_info->x;
                 mon->y = crtc_info->y;
                 mon->width = crtc_info->width;
                 mon->height = crtc_info->height;
                 mon->number = state->monitor_info.num_monitors;
-                
-                LogInfo("Monitor %d: %s %dx%d at %d,%d", 
+
+                LogInfo("Monitor %d: %s %dx%d at %d,%d",
                         state->monitor_info.num_monitors, output_info->name,
                         mon->width, mon->height, mon->x, mon->y);
-                
+
                 state->monitor_info.num_monitors++;
             }
-            if (crtc_info) XRRFreeCrtcInfo(crtc_info);
+            if (crtc_info)
+                XRRFreeCrtcInfo(crtc_info);
         }
         XRRFreeOutputInfo(output_info);
     }
 
     XRRFreeScreenResources(resources);
 
-    if (state->monitor_info.num_monitors == 0) {
-        // Fallback to single monitor
+    if (state->monitor_info.num_monitors == 0)
+    {
+
         free(state->monitor_info.monitors);
         state->monitor_info.monitors = malloc(sizeof(Monitor));
         state->monitor_info.num_monitors = 1;
         state->monitor_info.primary_monitor = 0;
-        
+
         state->monitor_info.monitors[0].x = 0;
         state->monitor_info.monitors[0].y = 0;
         state->monitor_info.monitors[0].width = DisplayWidth(state->display, state->screen);
         state->monitor_info.monitors[0].height = DisplayHeight(state->display, state->screen);
         state->monitor_info.monitors[0].number = 0;
-        
-        LogInfo("Fallback to single monitor: %dx%d", 
+
+        LogInfo("Fallback to single monitor: %dx%d",
                 state->monitor_info.monitors[0].width,
                 state->monitor_info.monitors[0].height);
     }
@@ -203,7 +661,8 @@ static int InitializeMultiMonitor(GooeyShellState *state)
 
 static void FreeMultiMonitor(GooeyShellState *state)
 {
-    if (state->monitor_info.monitors) {
+    if (state->monitor_info.monitors)
+    {
         free(state->monitor_info.monitors);
         state->monitor_info.monitors = NULL;
     }
@@ -218,36 +677,39 @@ static int GetMonitorForWindow(GooeyShellState *state, int x, int y, int width, 
     int window_center_x = x + width / 2;
     int window_center_y = y + height / 2;
 
-    // Find the monitor that contains the window center
-    for (int i = 0; i < state->monitor_info.num_monitors; i++) {
+    for (int i = 0; i < state->monitor_info.num_monitors; i++)
+    {
         Monitor *mon = &state->monitor_info.monitors[i];
         if (window_center_x >= mon->x && window_center_x < mon->x + mon->width &&
-            window_center_y >= mon->y && window_center_y < mon->y + mon->height) {
+            window_center_y >= mon->y && window_center_y < mon->y + mon->height)
+        {
             return i;
         }
     }
 
-    // If no monitor contains the center, find the monitor with the most overlap
     int best_monitor = 0;
     int max_overlap = 0;
-    
-    for (int i = 0; i < state->monitor_info.num_monitors; i++) {
+
+    for (int i = 0; i < state->monitor_info.num_monitors; i++)
+    {
         Monitor *mon = &state->monitor_info.monitors[i];
-        
+
         int overlap_x1 = (x > mon->x) ? x : mon->x;
         int overlap_y1 = (y > mon->y) ? y : mon->y;
         int overlap_x2 = ((x + width) < (mon->x + mon->width)) ? (x + width) : (mon->x + mon->width);
         int overlap_y2 = ((y + height) < (mon->y + mon->height)) ? (y + height) : (mon->y + mon->height);
-        
-        if (overlap_x2 > overlap_x1 && overlap_y2 > overlap_y1) {
+
+        if (overlap_x2 > overlap_x1 && overlap_y2 > overlap_y1)
+        {
             int overlap_area = (overlap_x2 - overlap_x1) * (overlap_y2 - overlap_y1);
-            if (overlap_area > max_overlap) {
+            if (overlap_area > max_overlap)
+            {
                 max_overlap = overlap_area;
                 best_monitor = i;
             }
         }
     }
-    
+
     return best_monitor;
 }
 
@@ -276,12 +738,12 @@ GooeyShellState *GooeyShell_Init(void)
     state->focused_window = None;
     state->drag_window = None;
 
-    // Initialize multi-monitor support
     state->monitor_info.monitors = NULL;
     state->monitor_info.num_monitors = 0;
     state->monitor_info.primary_monitor = 0;
 
-    if (!InitializeMultiMonitor(state)) {
+    if (!InitializeMultiMonitor(state))
+    {
         LogError("Failed to initialize multi-monitor support");
         XCloseDisplay(state->display);
         free(state);
@@ -346,6 +808,13 @@ GooeyShellState *GooeyShell_Init(void)
     XDefineCursor(state->display, state->root, state->custom_cursor);
     XClearWindow(state->display, state->root);
     XFlush(state->display);
+
+    opened_windows = NULL;
+    opened_windows_count = 0;
+    opened_windows_capacity = 0;
+    state->is_dbus_init = false;
+
+    SetupDBUS(state);
 
     LogInfo("GooeyShell initialized successfully with %d monitors", state->monitor_info.num_monitors);
     return state;
@@ -419,7 +888,7 @@ static void UpdateWindowGeometry(GooeyShellState *state, WindowNode *node)
 
     if (node->is_desktop_app || node->is_fullscreen_app)
     {
-        // For desktop and fullscreen apps, use the monitor they're assigned to
+
         Monitor *mon = &state->monitor_info.monitors[node->monitor_number];
         XMoveResizeWindow(state->display, node->frame, mon->x, mon->y, mon->width, mon->height);
         XMoveResizeWindow(state->display, node->client, 0, 0, mon->width, mon->height);
@@ -551,8 +1020,18 @@ static int DetectAppTypeByTitleClass(GooeyShellState *state, Window client, int 
             SafeXFree(text_prop.value);
             return 1;
         }
-        else if (strstr(lower_title, "menu") || strstr(lower_title, "launcher") ||
-                 strstr(lower_title, "dock") || strstr(lower_title, "taskbar") ||
+
+        else if (strstr(lower_title, "app menu") || strstr(lower_title, "application menu") ||
+                 strstr(lower_title, "gooeyde_appmenu") || strstr(lower_title, "launcher") ||
+                 strstr(lower_title, "menu"))
+        {
+            *is_fullscreen = 1;
+            *stay_on_top = 1;
+            SafeXFree(text_prop.value);
+            return 1;
+        }
+
+        else if (strstr(lower_title, "dock") || strstr(lower_title, "taskbar") ||
                  strstr(lower_title, "panel") || strstr(lower_title, "toolbar"))
         {
             *is_fullscreen = 1;
@@ -577,14 +1056,22 @@ static int DetectAppTypeByTitleClass(GooeyShellState *state, Window client, int 
             }
             lower_class[strlen(class_hint.res_name) < 255 ? strlen(class_hint.res_name) : 255] = '\0';
 
-            if (strstr(lower_class, "desktop") || strstr(lower_class, "taskbar"))
+            if (strstr(lower_class, "desktop") || strstr(lower_class, "background"))
             {
                 *is_desktop = 1;
                 detected = 1;
             }
-            else if (strstr(lower_class, "menu") || strstr(lower_class, "launcher") ||
-                     strstr(lower_class, "dock") || strstr(lower_class, "panel") ||
-                     strstr(lower_class, "toolbar"))
+
+            else if (strstr(lower_class, "gooeyde_appmenu") || strstr(lower_class, "appmenu") ||
+                     strstr(lower_class, "launcher") || strstr(lower_class, "menu"))
+            {
+                *is_fullscreen = 1;
+                *stay_on_top = 1;
+                detected = 1;
+            }
+
+            else if (strstr(lower_class, "dock") || strstr(lower_class, "taskbar") ||
+                     strstr(lower_class, "panel") || strstr(lower_class, "toolbar"))
             {
                 *is_fullscreen = 1;
                 *stay_on_top = 1;
@@ -725,6 +1212,12 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
     if (!ValidateWindowState(state))
         return 0;
 
+    if (FindWindowNodeByClient(state, client) != NULL)
+    {
+        LogInfo("Window %lu is already managed, ignoring duplicate", client);
+        return 0;
+    }
+
     XWindowAttributes attr;
     if (XGetWindowAttributes(state->display, client, &attr) == 0)
     {
@@ -741,7 +1234,7 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
 
     if (is_desktop_app)
     {
-        // Desktop apps go on monitor 0 by default, or spread across monitors
+
         monitor_number = 0;
         Monitor *mon = &state->monitor_info.monitors[monitor_number];
         frame_width = mon->width;
@@ -753,14 +1246,13 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
     }
     else
     {
-        // Regular windows - determine which monitor they should be on
+
         monitor_number = GetMonitorForWindow(state, attr.x, attr.y, client_width, client_height);
         Monitor *mon = &state->monitor_info.monitors[monitor_number];
-        
-        // Center the window on the monitor
+
         int x = mon->x + (mon->width - client_width) / 2;
         int y = mon->y + (mon->height - client_height) / 2;
-        
+
         frame_width = client_width + 2 * BORDER_WIDTH;
         frame_height = client_height + TITLE_BAR_HEIGHT + 2 * BORDER_WIDTH;
 
@@ -786,20 +1278,24 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
     new_node->frame = frame;
     new_node->client = client;
     new_node->monitor_number = monitor_number;
-    
-    if (is_desktop_app) {
+    new_node->is_minimized = False;
+
+    if (is_desktop_app)
+    {
         Monitor *mon = &state->monitor_info.monitors[monitor_number];
         new_node->x = mon->x;
         new_node->y = mon->y;
         new_node->width = mon->width;
         new_node->height = mon->height;
-    } else {
+    }
+    else
+    {
         new_node->x = attr.x;
         new_node->y = attr.y;
         new_node->width = client_width;
         new_node->height = client_height;
     }
-    
+
     new_node->title = StrDup("Untitled");
     new_node->is_fullscreen = is_desktop_app;
     new_node->is_titlebar_disabled = is_desktop_app;
@@ -829,11 +1325,11 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
                      ExposureMask | ButtonPressMask | ButtonReleaseMask |
                          PointerMotionMask | StructureNotifyMask | EnterWindowMask | LeaveWindowMask);
         XSelectInput(state->display, client, PropertyChangeMask | StructureNotifyMask);
-        
+
         Monitor *mon = &state->monitor_info.monitors[monitor_number];
         int client_x = BORDER_WIDTH;
         int client_y = TITLE_BAR_HEIGHT + BORDER_WIDTH;
-        
+
         XReparentWindow(state->display, client, frame, client_x, client_y);
         XDefineCursor(state->display, frame, state->custom_cursor);
         EnsureDesktopAppStaysInBackground(state);
@@ -845,6 +1341,10 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
         XSetWMProtocols(state->display, client, protocols, 1);
     }
 
+    AddToOpenedWindows(frame);
+
+    SendWindowStateThroughDBus(state, frame, "opened");
+
     XMapWindow(state->display, frame);
     XMapWindow(state->display, client);
 
@@ -855,6 +1355,8 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
         DrawTitleBar(state, new_node);
     }
 
+    SendWindowListThroughDBus(state);
+
     LogInfo("Created %s window on monitor %d: %s", is_desktop_app ? "desktop" : "regular", monitor_number, new_node->title);
     return 1;
 }
@@ -864,6 +1366,12 @@ static int CreateFullscreenAppWindow(GooeyShellState *state, Window client, int 
     if (!ValidateWindowState(state))
         return 0;
 
+    if (FindWindowNodeByClient(state, client) != NULL)
+    {
+        LogInfo("Window %lu is already managed, ignoring duplicate", client);
+        return 0;
+    }
+
     XWindowAttributes attr;
     if (XGetWindowAttributes(state->display, client, &attr) == 0)
     {
@@ -871,7 +1379,6 @@ static int CreateFullscreenAppWindow(GooeyShellState *state, Window client, int 
         return 0;
     }
 
-    // Determine which monitor this fullscreen app should be on
     int monitor_number = GetMonitorForWindow(state, attr.x, attr.y, attr.width, attr.height);
     Monitor *mon = &state->monitor_info.monitors[monitor_number];
 
@@ -905,6 +1412,7 @@ static int CreateFullscreenAppWindow(GooeyShellState *state, Window client, int 
     new_node->is_titlebar_disabled = True;
     new_node->is_fullscreen_app = True;
     new_node->stay_on_top = stay_on_top;
+    new_node->is_minimized = False;
     new_node->next = state->window_list;
     state->window_list = new_node;
 
@@ -931,9 +1439,15 @@ static int CreateFullscreenAppWindow(GooeyShellState *state, Window client, int 
         XSetWMProtocols(state->display, client, protocols, 1);
     }
 
+    AddToOpenedWindows(frame);
+
+    SendWindowStateThroughDBus(state, frame, "opened");
+
     XMapWindow(state->display, frame);
     XMapWindow(state->display, client);
     SetupFullscreenApp(state, new_node, stay_on_top);
+
+    SendWindowListThroughDBus(state);
 
     LogInfo("Created fullscreen app window on monitor %d: %s", monitor_number, new_node->title);
     return 1;
@@ -964,6 +1478,10 @@ static void RemoveWindow(GooeyShellState *state, Window client)
             WindowNode *to_free = *current;
             *current = (*current)->next;
 
+            RemoveFromOpenedWindows(to_free->frame);
+
+            SendWindowStateThroughDBus(state, to_free->frame, "closed");
+
             if (state->desktop_app_window == to_free->frame)
             {
                 state->desktop_app_window = None;
@@ -975,6 +1493,8 @@ static void RemoveWindow(GooeyShellState *state, Window client)
 
             XDestroyWindow(state->display, to_free->frame);
             FreeWindowNode(to_free);
+
+            SendWindowListThroughDBus(state);
             break;
         }
         current = &(*current)->next;
@@ -1189,7 +1709,7 @@ static void ToggleFullscreen(GooeyShellState *state, WindowNode *node)
 
     if (node->is_fullscreen)
     {
-        // Restore from fullscreen
+
         XMoveResizeWindow(state->display, node->frame,
                           node->x, node->y,
                           node->width + 2 * BORDER_WIDTH,
@@ -1197,10 +1717,12 @@ static void ToggleFullscreen(GooeyShellState *state, WindowNode *node)
         XResizeWindow(state->display, node->client, node->width, node->height);
         node->is_fullscreen = False;
         LogInfo("Window %s restored from fullscreen", node->title);
+
+        SendWindowStateThroughDBus(state, node->frame, "restored");
     }
     else
     {
-        // Go fullscreen on current monitor
+
         XWindowAttributes attr;
         if (XGetWindowAttributes(state->display, node->frame, &attr))
         {
@@ -1208,7 +1730,6 @@ static void ToggleFullscreen(GooeyShellState *state, WindowNode *node)
             node->y = attr.y;
         }
 
-        // Use the monitor the window is currently on
         int monitor_number = GetMonitorForWindow(state, node->x, node->y, node->width, node->height);
         Monitor *mon = &state->monitor_info.monitors[monitor_number];
 
@@ -1218,6 +1739,8 @@ static void ToggleFullscreen(GooeyShellState *state, WindowNode *node)
                       mon->height - TITLE_BAR_HEIGHT - 2 * BORDER_WIDTH);
         node->is_fullscreen = True;
         LogInfo("Window %s set to fullscreen on monitor %d", node->title, monitor_number);
+
+        SendWindowStateThroughDBus(state, node->frame, "fullscreen");
     }
 
     if (!node->is_titlebar_disabled)
@@ -1234,6 +1757,22 @@ static void MinimizeWindow(GooeyShellState *state, WindowNode *node)
     LogInfo("Minimizing window: %s", node->title);
     XUnmapWindow(state->display, node->frame);
     XUnmapWindow(state->display, node->client);
+    node->is_minimized = True;
+
+    SendWindowStateThroughDBus(state, node->frame, "minimized");
+}
+
+static void RestoreWindow(GooeyShellState *state, WindowNode *node)
+{
+    if (!node || node->is_desktop_app || node->is_fullscreen_app)
+        return;
+
+    LogInfo("Restoring window: %s", node->title);
+    XMapWindow(state->display, node->frame);
+    XMapWindow(state->display, node->client);
+    node->is_minimized = False;
+
+    SendWindowStateThroughDBus(state, node->frame, "restored");
 }
 
 static void HandleButtonPress(GooeyShellState *state, XButtonEvent *ev)
@@ -1383,7 +1922,6 @@ static void HandleMotionNotify(GooeyShellState *state, XMotionEvent *ev)
         int new_x = state->window_start_x + delta_x;
         int new_y = state->window_start_y + delta_y;
 
-        // Constrain to monitor bounds
         int monitor_number = GetMonitorForWindow(state, new_x, new_y, node->width, node->height);
         Monitor *mon = &state->monitor_info.monitors[monitor_number];
 
@@ -1409,7 +1947,6 @@ static void HandleMotionNotify(GooeyShellState *state, XMotionEvent *ev)
         new_width = (new_width < MIN_WINDOW_WIDTH) ? MIN_WINDOW_WIDTH : new_width;
         new_height = (new_height < MIN_WINDOW_HEIGHT) ? MIN_WINDOW_HEIGHT : new_height;
 
-        // Constrain to monitor bounds
         int monitor_number = GetMonitorForWindow(state, node->x, node->y, new_width, new_height);
         Monitor *mon = &state->monitor_info.monitors[monitor_number];
         int max_width = mon->width - 50;
@@ -1500,6 +2037,12 @@ void GooeyShell_RunEventLoop(GooeyShellState *state)
         case MapRequest:
         {
             Window client = ev.xmaprequest.window;
+
+            if (FindWindowNodeByClient(state, client) != NULL)
+            {
+                LogInfo("Window %lu is already managed, ignoring duplicate MapRequest", client);
+                break;
+            }
 
             XWindowAttributes attr;
             if (XGetWindowAttributes(state->display, client, &attr) == 0)
@@ -1801,6 +2344,61 @@ int GooeyShell_IsTitlebarEnabled(GooeyShellState *state, Window client)
     return !node->is_titlebar_disabled;
 }
 
+Window *GooeyShell_GetOpenedWindows(GooeyShellState *state, int *count)
+{
+    if (count)
+    {
+        *count = opened_windows_count;
+    }
+    return opened_windows;
+}
+
+int GooeyShell_IsWindowOpened(GooeyShellState *state, Window window)
+{
+    return IsWindowInOpenedWindows(window);
+}
+
+void GooeyShell_MinimizeWindow(GooeyShellState *state, Window client)
+{
+    if (!ValidateWindowState(state))
+        return;
+
+    WindowNode *node = FindWindowNodeByClient(state, client);
+    if (node && !node->is_desktop_app && !node->is_fullscreen_app)
+    {
+        MinimizeWindow(state, node);
+    }
+}
+
+void GooeyShell_RestoreWindow(GooeyShellState *state, Window client)
+{
+    if (!ValidateWindowState(state))
+        return;
+
+    WindowNode *node = FindWindowNodeByClient(state, client);
+    if (node && !node->is_desktop_app && !node->is_fullscreen_app)
+    {
+        RestoreWindow(state, node);
+    }
+}
+
+int GooeyShell_IsWindowMinimized(GooeyShellState *state, Window client)
+{
+    if (!state)
+        return 0;
+
+    WindowNode *node = FindWindowNodeByClient(state, client);
+    if (!node)
+        return 0;
+
+    return node->is_minimized;
+}
+
+void GooeyShell_SendWindowList(GooeyShellState *state)
+{
+    SendWindowListThroughDBus(state);
+}
+
 void GooeyShell_Cleanup(GooeyShellState *state)
 {
     if (!state)
@@ -1828,6 +2426,19 @@ void GooeyShell_Cleanup(GooeyShellState *state)
     state->window_list = NULL;
 
     FreeMultiMonitor(state);
+
+    if (opened_windows)
+    {
+        free(opened_windows);
+        opened_windows = NULL;
+        opened_windows_count = 0;
+        opened_windows_capacity = 0;
+    }
+
+    if (state->dbus_connection)
+    {
+        dbus_connection_unref(state->dbus_connection);
+    }
 
     if (state->text_gc)
         XFreeGC(state->display, state->text_gc);

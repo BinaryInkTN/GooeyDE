@@ -2,6 +2,8 @@
 #define GOOEY_SHELL_H
 
 #include <X11/Xlib.h>
+#include <dbus-1.0/dbus/dbus.h>
+#include <stdbool.h>
 
 #define WINDOW_MANAGER_NAME "GooeyShell"
 #define TITLE_BAR_HEIGHT 24
@@ -36,18 +38,21 @@ typedef struct
     Atom net_wm_state_skip_taskbar;
     Atom net_wm_state_skip_pager;
     Atom net_wm_state_sticky;
+    Atom net_wm_state_hidden;
     Atom gooey_fullscreen_app;
     Atom gooey_stay_on_top;
     Atom gooey_desktop_app;
 } PrecomputedAtoms;
 
-typedef struct {
+typedef struct
+{
     int x, y;
     int width, height;
     int number;
 } Monitor;
 
-typedef struct {
+typedef struct
+{
     Monitor *monitors;
     int num_monitors;
     int primary_monitor;
@@ -64,6 +69,7 @@ struct WindowNode
     Bool is_titlebar_disabled;
     Bool is_desktop_app;
     Bool is_fullscreen_app;
+    Bool is_minimized;
     Bool stay_on_top;
     int monitor_number;
 
@@ -108,6 +114,11 @@ struct GooeyShellState
 
     Window desktop_app_window;
     Window fullscreen_app_window;
+
+    bool is_dbus_init;
+    // DBUS Connection
+    DBusConnection *dbus_connection;
+    struct DBusError dbus_error;
 };
 
 GooeyShellState *GooeyShell_Init(void);

@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <GLPS/glps_thread.h>
+#include <dbus/dbus.h>
 
 ScreenInfo screen_info;
 GooeyWindow *win = NULL;
@@ -47,9 +48,699 @@ int current_brightness = 80;
 int battery_level = 85;
 char network_status[64] = "Connected";
 
+static DBusConnection *dbus_conn = NULL;
+static int dbus_initialized = 0;
+static int dbus_thread_running = 1;
+
+typedef struct
+{
+    unsigned long window_id;
+    char *title;
+    char *state;
+    int is_minimized;
+    int is_fullscreen;
+} ManagedWindow;
+
+static ManagedWindow *managed_windows = NULL;
+static int managed_windows_count = 0;
+static int managed_windows_capacity = 0;
+
+static GooeyButton **dock_app_buttons = NULL;
+static char **dock_app_window_ids = NULL;
+static int dock_app_buttons_count = 0;
+static int dock_app_buttons_capacity = 0;
+
+static GooeyImage *dock_bg = NULL;
+static int dock_width = 0;
+static int dock_height = 0;
+static int dock_x = 0;
+static int dock_y = 0;
+
+#define DBUS_SERVICE "dev.binaryink.gshell"
+#define DBUS_PATH "/dev/binaryink/gshell"
+#define DBUS_INTERFACE "dev.binaryink.gshell"
+
+#define DOCK_APP_SIZE 48
+#define DOCK_APP_MARGIN 10
+#define DOCK_APP_MAX 8
+
+void execute_system_command(const char *command);
+int get_system_brightness();
+int get_max_brightness();
+int get_system_volume();
+int get_system_wifi_state();
+int get_system_bluetooth_state();
+int get_battery_level();
+void get_network_status();
+void init_system_settings();
+void update_status_icons();
+void run_app_menu();
+void run_systemsettings();
+void update_time_date();
+void *time_update_thread(void *arg);
+void toggle_control_panel();
+void create_control_panel();
+void destroy_control_panel();
+void set_control_panel_visibility(int visible);
+void wifi_switch_callback(bool value);
+void bluetooth_switch_callback(bool value);
+void airplane_switch_callback(bool value);
+void volume_slider_callback(long value);
+void brightness_slider_callback(long value);
+void mute_audio_callback();
+void refresh_system_info();
+
+int init_dbus_connection();
+void cleanup_dbus();
+void *dbus_monitor_thread(void *arg);
+void process_dbus_message(DBusMessage *message);
+void handle_window_list_updated(DBusMessage *message);
+void handle_window_state_changed(DBusMessage *message);
+void request_window_list();
+void send_window_command(const char *window_id, const char *command);
+void update_dock_apps();
+void create_dock_app_button(const char *window_id, const char *title, const char *state);
+void update_dock_app_button(const char *window_id, const char *state);
+void remove_dock_app_button(const char *window_id);
+void dock_app_button_callback(int button_index);
+void cleanup_dock_app_buttons();
+ManagedWindow *find_managed_window(const char *window_id);
+void add_managed_window(const char *window_id, const char *title, const char *state);
+void update_managed_window(const char *window_id, const char *state);
+void remove_managed_window(const char *window_id);
+const char *get_app_icon_for_title(const char *title);
+
+void dock_app_button_clicked(GooeyButton *button)
+{
+
+    for (int i = 0; i < dock_app_buttons_count; i++)
+    {
+        if (dock_app_buttons[i] == button)
+        {
+            dock_app_button_callback(i);
+            return;
+        }
+    }
+}
+
+int init_dbus_connection()
+{
+    DBusError error;
+    dbus_error_init(&error);
+
+    dbus_conn = dbus_bus_get(DBUS_BUS_SESSION, &error);
+    if (dbus_error_is_set(&error))
+    {
+        fprintf(stderr, "DBus Connection Error: %s\n", error.message);
+        dbus_error_free(&error);
+        return 0;
+    }
+
+    if (!dbus_conn)
+    {
+        fprintf(stderr, "Failed to get DBus connection\n");
+        return 0;
+    }
+
+    int ret = dbus_bus_request_name(dbus_conn, "dev.binaryink.gshell.desktop",
+                                    DBUS_NAME_FLAG_REPLACE_EXISTING, &error);
+    if (dbus_error_is_set(&error))
+    {
+        fprintf(stderr, "DBus Name Error: %s\n", error.message);
+        dbus_error_free(&error);
+        dbus_connection_close(dbus_conn);
+        dbus_conn = NULL;
+        return 0;
+    }
+
+    if (ret != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER)
+    {
+        fprintf(stderr, "Not primary owner of DBus name\n");
+        dbus_connection_close(dbus_conn);
+        dbus_conn = NULL;
+        return 0;
+    }
+
+    char match_rule[256];
+    snprintf(match_rule, sizeof(match_rule),
+             "type='signal',interface='%s',path='%s'",
+             DBUS_INTERFACE, DBUS_PATH);
+
+    dbus_bus_add_match(dbus_conn, match_rule, &error);
+    if (dbus_error_is_set(&error))
+    {
+        fprintf(stderr, "DBus Match Error: %s\n", error.message);
+        dbus_error_free(&error);
+        dbus_connection_close(dbus_conn);
+        dbus_conn = NULL;
+        return 0;
+    }
+
+    dbus_initialized = 1;
+    printf("DBus initialized successfully\n");
+    return 1;
+}
+
+void cleanup_dbus()
+{
+    if (dbus_conn)
+    {
+        dbus_connection_close(dbus_conn);
+        dbus_conn = NULL;
+    }
+    dbus_initialized = 0;
+}
+
+void *dbus_monitor_thread(void *arg)
+{
+    printf("DBus monitor thread started\n");
+
+    while (dbus_thread_running && dbus_initialized)
+    {
+
+        if (!dbus_connection_read_write(dbus_conn, 50))
+        {
+            usleep(50000);
+            continue;
+        }
+
+        DBusMessage *message;
+        while ((message = dbus_connection_pop_message(dbus_conn)) != NULL)
+        {
+            process_dbus_message(message);
+            dbus_message_unref(message);
+        }
+
+        usleep(50000);
+    }
+
+    printf("DBus monitor thread stopped\n");
+    return NULL;
+}
+
+void process_dbus_message(DBusMessage *message)
+{
+    if (!message)
+        return;
+
+    const char *interface = dbus_message_get_interface(message);
+    const char *member = dbus_message_get_member(message);
+
+    if (!interface || !member)
+        return;
+
+    if (strcmp(interface, DBUS_INTERFACE) == 0)
+    {
+        if (strcmp(member, "WindowListUpdated") == 0)
+        {
+            handle_window_list_updated(message);
+        }
+        else if (strcmp(member, "WindowStateChanged") == 0)
+        {
+            handle_window_state_changed(message);
+        }
+    }
+}
+void handle_window_list_updated(DBusMessage *message)
+{
+    DBusMessageIter iter;
+    if (!dbus_message_iter_init(message, &iter))
+    {
+        fprintf(stderr, "No arguments in WindowListUpdated signal\n");
+        return;
+    }
+
+    for (int i = 0; i < managed_windows_count; i++)
+    {
+        free(managed_windows[i].title);
+        free(managed_windows[i].state);
+    }
+    managed_windows_count = 0;
+
+    DBusMessageIter array_iter;
+    if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_ARRAY)
+    {
+        dbus_message_iter_recurse(&iter, &array_iter);
+
+        while (dbus_message_iter_get_arg_type(&array_iter) == DBUS_TYPE_STRING)
+        {
+            const char *window_id;
+            dbus_message_iter_get_basic(&array_iter, &window_id);
+
+            if (window_id)
+            {
+                printf("Adding window ID from shell: %s\n", window_id);
+
+                add_managed_window(window_id, window_id, "normal");
+            }
+
+            dbus_message_iter_next(&array_iter);
+        }
+    }
+
+    printf("Received window list update: %d windows\n", managed_windows_count);
+    update_dock_apps();
+}
+void handle_window_state_changed(DBusMessage *message)
+{
+    DBusMessageIter iter;
+    if (!dbus_message_iter_init(message, &iter))
+    {
+        fprintf(stderr, "No arguments in WindowStateChanged signal\n");
+        return;
+    }
+
+    const char *window_id = NULL;
+    const char *state = NULL;
+
+    if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_STRING)
+    {
+        dbus_message_iter_get_basic(&iter, &window_id);
+        dbus_message_iter_next(&iter);
+    }
+
+    if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_STRING)
+    {
+        dbus_message_iter_get_basic(&iter, &state);
+    }
+
+    if (window_id && state)
+    {
+        printf("Window state changed: %s -> %s\n", window_id, state);
+        update_managed_window(window_id, state);
+        update_dock_app_button(window_id, state);
+    }
+}
+
+void request_window_list()
+{
+    if (!dbus_initialized)
+        return;
+
+    DBusMessage *message;
+    DBusPendingCall *pending;
+
+    message = dbus_message_new_method_call(DBUS_SERVICE, DBUS_PATH,
+                                           DBUS_INTERFACE, "GetWindowList");
+    if (!message)
+    {
+        fprintf(stderr, "Failed to create DBus method call\n");
+        return;
+    }
+
+    if (!dbus_connection_send_with_reply(dbus_conn, message, &pending, 2000))
+    {
+        fprintf(stderr, "Failed to send DBus message\n");
+        dbus_message_unref(message);
+        return;
+    }
+
+    dbus_message_unref(message);
+
+    if (!pending)
+    {
+        fprintf(stderr, "No pending call\n");
+        return;
+    }
+
+    dbus_pending_call_block(pending);
+
+    message = dbus_pending_call_steal_reply(pending);
+    if (message)
+    {
+        process_dbus_message(message);
+        dbus_message_unref(message);
+    }
+
+    dbus_pending_call_unref(pending);
+}
+
+void send_window_command(const char *window_id, const char *command)
+{
+    if (!dbus_initialized || !window_id || !command)
+        return;
+
+    DBusMessage *message;
+    DBusMessageIter iter;
+
+    message = dbus_message_new_method_call(DBUS_SERVICE, DBUS_PATH,
+                                           DBUS_INTERFACE, "SendWindowCommand");
+    if (!message)
+    {
+        fprintf(stderr, "Failed to create DBus method call\n");
+        return;
+    }
+
+    dbus_message_iter_init_append(message, &iter);
+    dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &window_id);
+    dbus_message_iter_append_basic(&iter, DBUS_TYPE_STRING, &command);
+
+    if (!dbus_connection_send(dbus_conn, message, NULL))
+    {
+        fprintf(stderr, "Failed to send DBus command\n");
+    }
+    else
+    {
+        dbus_connection_flush(dbus_conn);
+        printf("Sent command '%s' for window %s\n", command, window_id);
+    }
+
+    dbus_message_unref(message);
+}
+
+ManagedWindow *find_managed_window(const char *window_id)
+{
+    if (!window_id)
+        return NULL;
+
+    unsigned long id = strtoul(window_id, NULL, 10);
+    for (int i = 0; i < managed_windows_count; i++)
+    {
+        if (managed_windows[i].window_id == id)
+        {
+            return &managed_windows[i];
+        }
+    }
+    return NULL;
+}
+
+void add_managed_window(const char *window_id, const char *title, const char *state)
+{
+    if (!window_id)
+        return;
+
+    if (managed_windows_count >= managed_windows_capacity)
+    {
+        int new_capacity = managed_windows_capacity == 0 ? 8 : managed_windows_capacity * 2;
+        ManagedWindow *new_array = realloc(managed_windows, new_capacity * sizeof(ManagedWindow));
+        if (!new_array)
+        {
+            fprintf(stderr, "Failed to realloc managed_windows array\n");
+            return;
+        }
+        managed_windows = new_array;
+        managed_windows_capacity = new_capacity;
+    }
+
+    ManagedWindow *window = &managed_windows[managed_windows_count++];
+    window->window_id = strtoul(window_id, NULL, 10);
+    window->title = title ? strdup(title) : strdup("Unknown");
+    window->state = state ? strdup(state) : strdup("normal");
+    window->is_minimized = (state && strcmp(state, "minimized") == 0);
+    window->is_fullscreen = (state && strcmp(state, "fullscreen") == 0);
+}
+
+void update_managed_window(const char *window_id, const char *state)
+{
+    ManagedWindow *window = find_managed_window(window_id);
+    if (window && state)
+    {
+        free(window->state);
+        window->state = strdup(state);
+        window->is_minimized = (strcmp(state, "minimized") == 0);
+        window->is_fullscreen = (strcmp(state, "fullscreen") == 0);
+    }
+}
+
+void remove_managed_window(const char *window_id)
+{
+    if (!window_id)
+        return;
+
+    unsigned long id = strtoul(window_id, NULL, 10);
+    for (int i = 0; i < managed_windows_count; i++)
+    {
+        if (managed_windows[i].window_id == id)
+        {
+            free(managed_windows[i].title);
+            free(managed_windows[i].state);
+
+            for (int j = i; j < managed_windows_count - 1; j++)
+            {
+                managed_windows[j] = managed_windows[j + 1];
+            }
+            managed_windows_count--;
+            return;
+        }
+    }
+}
+
+const char *get_app_icon_for_title(const char *title)
+{
+    if (!title)
+        return "assets/default_app.png";
+
+    char lower_title[256];
+    for (int i = 0; title[i] && i < 255; i++)
+    {
+        lower_title[i] = tolower(title[i]);
+    }
+    lower_title[strlen(title) < 255 ? strlen(title) : 255] = '\0';
+
+    if (strstr(lower_title, "firefox") || strstr(lower_title, "browser"))
+    {
+        return "assets/firefox.png";
+    }
+    else if (strstr(lower_title, "terminal") || strstr(lower_title, "term"))
+    {
+        return "assets/terminal.png";
+    }
+    else if (strstr(lower_title, "file") || strstr(lower_title, "nautilus"))
+    {
+        return "assets/files.png";
+    }
+    else if (strstr(lower_title, "text") || strstr(lower_title, "editor"))
+    {
+        return "assets/text_editor.png";
+    }
+    else if (strstr(lower_title, "calculator"))
+    {
+        return "assets/calculator.png";
+    }
+    else if (strstr(lower_title, "music") || strstr(lower_title, "audio"))
+    {
+        return "assets/music.png";
+    }
+    else if (strstr(lower_title, "video") || strstr(lower_title, "player"))
+    {
+        return "assets/video.png";
+    }
+    else if (strstr(lower_title, "settings") || strstr(lower_title, "config"))
+    {
+        return "assets/settings.png";
+    }
+
+    return "assets/default_app.png";
+}
+
+void cleanup_dock_app_buttons()
+{
+    if (!dock_app_buttons)
+        return;
+
+    for (int i = 0; i < dock_app_buttons_count; i++)
+    {
+        if (dock_app_buttons[i])
+        {
+        }
+    }
+    free(dock_app_buttons);
+    dock_app_buttons = NULL;
+
+    if (dock_app_window_ids)
+    {
+        for (int i = 0; i < dock_app_buttons_count; i++)
+        {
+            if (dock_app_window_ids[i])
+            {
+                free(dock_app_window_ids[i]);
+            }
+        }
+        free(dock_app_window_ids);
+        dock_app_window_ids = NULL;
+    }
+
+    dock_app_buttons_count = 0;
+    dock_app_buttons_capacity = 0;
+}
+
+void create_dock_app_button(const char *window_id, const char *title, const char *state)
+{
+    if (!window_id || !title)
+        return;
+
+    if (dock_app_buttons_count >= dock_app_buttons_capacity)
+    {
+        int new_capacity = dock_app_buttons_capacity == 0 ? 4 : dock_app_buttons_capacity * 2;
+        GooeyButton **new_buttons = realloc(dock_app_buttons, new_capacity * sizeof(GooeyButton *));
+        char **new_window_ids = realloc(dock_app_window_ids, new_capacity * sizeof(char *));
+
+        if (!new_buttons || !new_window_ids)
+        {
+            fprintf(stderr, "Failed to realloc dock arrays\n");
+            return;
+        }
+        dock_app_buttons = new_buttons;
+        dock_app_window_ids = new_window_ids;
+        dock_app_buttons_capacity = new_capacity;
+    }
+
+    int total_width = (DOCK_APP_SIZE + DOCK_APP_MARGIN) * dock_app_buttons_count;
+    int start_x = dock_x + (dock_width - total_width) / 2;
+    int button_x = start_x + (dock_app_buttons_count * (DOCK_APP_SIZE + DOCK_APP_MARGIN));
+    int button_y = dock_y + (dock_height - DOCK_APP_SIZE) / 2;
+
+    if (dock_app_buttons_count >= DOCK_APP_MAX)
+    {
+        printf("Too many apps in dock, skipping: %s\n", title);
+        return;
+    }
+
+    dock_app_window_ids[dock_app_buttons_count] = strdup(window_id);
+    if (!dock_app_window_ids[dock_app_buttons_count])
+    {
+        fprintf(stderr, "Failed to duplicate window_id\n");
+        return;
+    }
+
+    char button_label[32];
+    snprintf(button_label, sizeof(button_label), "%.20s", title);
+
+    dock_app_buttons[dock_app_buttons_count] = GooeyButton_Create(
+        button_label,
+        button_x,
+        button_y,
+        DOCK_APP_SIZE,
+        DOCK_APP_SIZE,
+        dock_app_button_clicked);
+
+    if (dock_app_buttons[dock_app_buttons_count])
+    {
+
+        GooeyWindow_RegisterWidget(win, dock_app_buttons[dock_app_buttons_count]);
+        dock_app_buttons_count++;
+
+        printf("Created dock app button: %s (%s) at %d,%d\n", title, state, button_x, button_y);
+    }
+    else
+    {
+        free(dock_app_window_ids[dock_app_buttons_count]);
+        dock_app_window_ids[dock_app_buttons_count] = NULL;
+        fprintf(stderr, "Failed to create dock app button for: %s\n", title);
+    }
+}
+
+void update_dock_app_button(const char *window_id, const char *state)
+{
+    if (!window_id || !state)
+        return;
+
+    for (int i = 0; i < dock_app_buttons_count; i++)
+    {
+        if (dock_app_window_ids[i] && strcmp(dock_app_window_ids[i], window_id) == 0)
+        {
+
+            if (strcmp(state, "minimized") == 0)
+            {
+
+                printf("Dock app %s is minimized\n", window_id);
+            }
+            else if (strcmp(state, "normal") == 0 || strcmp(state, "restored") == 0)
+            {
+
+                printf("Dock app %s is restored\n", window_id);
+            }
+            return;
+        }
+    }
+}
+
+void remove_dock_app_button(const char *window_id)
+{
+    if (!window_id)
+        return;
+
+    for (int i = 0; i < dock_app_buttons_count; i++)
+    {
+        if (dock_app_window_ids[i] && strcmp(dock_app_window_ids[i], window_id) == 0)
+        {
+            printf("Removing dock app button %s\n", window_id);
+
+            free(dock_app_window_ids[i]);
+
+            for (int j = i; j < dock_app_buttons_count - 1; j++)
+            {
+                dock_app_buttons[j] = dock_app_buttons[j + 1];
+                dock_app_window_ids[j] = dock_app_window_ids[j + 1];
+            }
+            dock_app_buttons_count--;
+
+            update_dock_apps();
+            return;
+        }
+    }
+}
+
+void dock_app_button_callback(int button_index)
+{
+    if (button_index < 0 || button_index >= dock_app_buttons_count)
+    {
+        printf("Invalid button index: %d\n", button_index);
+        return;
+    }
+
+    const char *window_id = dock_app_window_ids[button_index];
+    if (!window_id)
+    {
+        printf("No window ID for button index %d\n", button_index);
+        return;
+    }
+
+    ManagedWindow *window = find_managed_window(window_id);
+    if (window)
+    {
+        if (window->is_minimized)
+        {
+
+            printf("Restoring window: %s\n", window->title);
+            send_window_command(window_id, "restore");
+        }
+        else
+        {
+
+            printf("Minimizing window: %s\n", window->title);
+            send_window_command(window_id, "minimize");
+        }
+    }
+    else
+    {
+        printf("Window not found: %s\n", window_id);
+    }
+}
+
+void update_dock_apps()
+{
+    printf("Updating dock with %d windows\n", managed_windows_count);
+
+    cleanup_dock_app_buttons();
+
+    for (int i = 0; i < managed_windows_count; i++)
+    {
+        char window_id_str[32];
+        snprintf(window_id_str, sizeof(window_id_str), "%lu", managed_windows[i].window_id);
+
+        create_dock_app_button(window_id_str, managed_windows[i].title, managed_windows[i].state);
+    }
+}
+
 void execute_system_command(const char *command)
 {
-    system(command);
+    if (fork() == 0)
+    {
+        execl("/bin/sh", "sh", "-c", command, NULL);
+        perror("Failed to execute command");
+        exit(1);
+    }
 }
 
 int get_system_brightness()
@@ -58,7 +749,10 @@ int get_system_brightness()
     if (fp)
     {
         int brightness = 80;
-        fscanf(fp, "%d", &brightness);
+        if (fscanf(fp, "%d", &brightness) != 1)
+        {
+            brightness = 80;
+        }
         pclose(fp);
         return brightness;
     }
@@ -71,7 +765,10 @@ int get_max_brightness()
     if (fp)
     {
         int max_brightness = 100;
-        fscanf(fp, "%d", &max_brightness);
+        if (fscanf(fp, "%d", &max_brightness) != 1)
+        {
+            max_brightness = 100;
+        }
         pclose(fp);
         return max_brightness;
     }
@@ -84,7 +781,10 @@ int get_system_volume()
     if (fp)
     {
         int volume = 75;
-        fscanf(fp, "%d", &volume);
+        if (fscanf(fp, "%d", &volume) != 1)
+        {
+            volume = 75;
+        }
         pclose(fp);
         return volume;
     }
@@ -129,7 +829,10 @@ int get_battery_level()
     if (fp)
     {
         int level = 85;
-        fscanf(fp, "%d", &level);
+        if (fscanf(fp, "%d", &level) != 1)
+        {
+            level = 85;
+        }
         pclose(fp);
         return level;
     }
@@ -169,37 +872,35 @@ void get_network_status()
 void init_system_settings()
 {
 
-    int current_bright = get_system_brightness();
+    current_brightness = 80;
+    current_volume = 75;
+    battery_level = 85;
+    strcpy(network_status, "Connected");
+
+    current_brightness = get_system_brightness();
     int max_bright = get_max_brightness();
-    current_brightness = (current_bright * 100) / max_bright;
+    if (max_bright > 0)
+    {
+        current_brightness = (current_brightness * 100) / max_bright;
+    }
 
     current_volume = get_system_volume();
-
-    int wifi_state = get_system_wifi_state();
-
-    int bluetooth_state = get_system_bluetooth_state();
-
     battery_level = get_battery_level();
-
     get_network_status();
 
     printf("System settings initialized:\n");
     printf("  Brightness: %d%%\n", current_brightness);
     printf("  Volume: %d%%\n", current_volume);
-    printf("  WiFi: %s\n", wifi_state ? "Enabled" : "Disabled");
-    printf("  Bluetooth: %s\n", bluetooth_state ? "Enabled" : "Disabled");
     printf("  Battery: %d%%\n", battery_level);
     printf("  Network: %s\n", network_status);
 }
 
 void update_status_icons()
 {
-
     int wifi_state = get_system_wifi_state();
     if (wifi_status_icon)
     {
         const char *wifi_icon = wifi_state ? "assets/wifi_on.png" : "assets/wifi_off.png";
-
         GooeyImage_SetImage(wifi_status_icon, wifi_icon);
     }
 
@@ -214,7 +915,6 @@ void update_status_icons()
         else
         {
             GooeyWidget_MakeVisible(bluetooth_status_icon, true);
-
             GooeyImage_SetImage(bluetooth_status_icon, bluetooth_icon);
         }
     }
@@ -272,160 +972,6 @@ void update_status_icons()
     }
 }
 
-void run_app_menu();
-void update_time_date();
-void *time_update_thread(void *arg);
-void toggle_control_panel();
-void create_control_panel();
-void destroy_control_panel();
-void set_control_panel_visibility(int visible);
-
-void wifi_switch_callback(bool value)
-{
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "nmcli radio wifi %s", value ? "on" : "off");
-    execute_system_command(cmd);
-    printf("WiFi %s\n", value ? "Enabled" : "Disabled");
-
-    get_network_status();
-    if (network_label)
-    {
-        GooeyLabel_SetText(network_label, network_status);
-    }
-    update_status_icons();
-}
-
-void bluetooth_switch_callback(bool value)
-{
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "bluetoothctl power %s", value ? "on" : "off");
-    execute_system_command(cmd);
-    printf("Bluetooth %s\n", value ? "Enabled" : "Disabled");
-    update_status_icons();
-}
-
-void airplane_switch_callback(bool value)
-{
-    printf("Airplane Mode %s\n", value ? "Enabled" : "Disabled");
-
-    if (value)
-    {
-
-        if (wifi_switch && GooeySwitch_GetState(wifi_switch))
-        {
-            wifi_switch_callback(false);
-            GooeySwitch_Toggle(wifi_switch);
-        }
-        if (bluetooth_switch && GooeySwitch_GetState(bluetooth_switch))
-        {
-            bluetooth_switch_callback(false);
-            GooeySwitch_Toggle(bluetooth_switch);
-        }
-    }
-    else
-    {
-
-        if (wifi_switch && !GooeySwitch_GetState(wifi_switch))
-        {
-            wifi_switch_callback(true);
-            GooeySwitch_Toggle(wifi_switch);
-        }
-    }
-    update_status_icons();
-}
-
-void volume_slider_callback(long value)
-{
-    current_volume = value;
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "pactl set-sink-volume @DEFAULT_SINK@ %ld%%", value);
-    execute_system_command(cmd);
-    printf("Volume set to: %ld%%\n", value);
-
-    if (volume_value_label)
-    {
-        char volume_text[32];
-        snprintf(volume_text, sizeof(volume_text), "%ld%%", value);
-        GooeyLabel_SetText(volume_value_label, volume_text);
-    }
-    update_status_icons();
-}
-
-void brightness_slider_callback(long value)
-{
-    current_brightness = value;
-    int max_bright = get_max_brightness();
-    int actual_level = (value * max_bright) / 100;
-
-    char cmd[128];
-    snprintf(cmd, sizeof(cmd), "echo %d | sudo tee /sys/class/backlight/*/brightness >/dev/null 2>&1", actual_level);
-    execute_system_command(cmd);
-    printf("Brightness set to: %ld%%\n", value);
-
-    if (brightness_value_label)
-    {
-        char brightness_text[32];
-        snprintf(brightness_text, sizeof(brightness_text), "%ld%%", value);
-        GooeyLabel_SetText(brightness_value_label, brightness_text);
-    }
-}
-
-void mute_audio_callback()
-{
-    execute_system_command("pactl set-sink-mute @DEFAULT_SINK@ toggle");
-    printf("Audio mute toggled\n");
-    update_status_icons();
-}
-
-void refresh_system_info()
-{
-    printf("Refreshing system information...\n");
-
-    battery_level = get_battery_level();
-    if (battery_label)
-    {
-        char battery_text[32];
-        snprintf(battery_text, sizeof(battery_text), "Battery: %d%%", battery_level);
-        GooeyLabel_SetText(battery_label, battery_text);
-    }
-
-    get_network_status();
-    if (network_label)
-    {
-        GooeyLabel_SetText(network_label, network_status);
-    }
-
-    int system_volume = get_system_volume();
-    if (system_volume != current_volume && volume_slider)
-    {
-        current_volume = system_volume;
-        volume_slider->value = system_volume;
-        if (volume_value_label)
-        {
-            char volume_text[32];
-            snprintf(volume_text, sizeof(volume_text), "%d%%", system_volume);
-            GooeyLabel_SetText(volume_value_label, volume_text);
-        }
-    }
-
-    int system_brightness = get_system_brightness();
-    int max_bright = get_max_brightness();
-    int brightness_percent = (system_brightness * 100) / max_bright;
-    if (brightness_percent != current_brightness && brightness_slider)
-    {
-        current_brightness = brightness_percent;
-        brightness_slider->value = brightness_percent;
-        if (brightness_value_label)
-        {
-            char brightness_text[32];
-            snprintf(brightness_text, sizeof(brightness_text), "%d%%", brightness_percent);
-            GooeyLabel_SetText(brightness_value_label, brightness_text);
-        }
-    }
-
-    printf("System info refreshed\n");
-}
-
 void run_app_menu()
 {
     if (fork() == 0)
@@ -436,31 +982,54 @@ void run_app_menu()
     }
 }
 
-void set_control_panel_visibility(int visible)
+void run_systemsettings()
 {
-    if (!control_panel_bg)
-        return;
+    if (fork() == 0)
+    {
+        execl("./gooeyde_systemsettings", "./gooeyde_systemsettings", NULL);
+        perror("Failed to launch system settings");
+        exit(1);
+    }
+}
 
-    GooeyWidget_MakeVisible(control_panel_bg, visible);
-    GooeyWidget_MakeVisible(panel_title, visible);
-    GooeyWidget_MakeVisible(wifi_label, visible);
-    GooeyWidget_MakeVisible(wifi_switch, visible);
-    GooeyWidget_MakeVisible(bluetooth_label, visible);
-    GooeyWidget_MakeVisible(bluetooth_switch, visible);
-    GooeyWidget_MakeVisible(airplane_label, visible);
-    GooeyWidget_MakeVisible(airplane_switch, visible);
-    GooeyWidget_MakeVisible(settings_button, visible);
-    GooeyWidget_MakeVisible(settings_label, visible);
-    GooeyWidget_MakeVisible(settings_title, visible);
-    GooeyWidget_MakeVisible(volume_label, visible);
-    GooeyWidget_MakeVisible(volume_slider, visible);
-    GooeyWidget_MakeVisible(volume_value_label, visible);
-    GooeyWidget_MakeVisible(brightness_label, visible);
-    GooeyWidget_MakeVisible(brightness_slider, visible);
-    GooeyWidget_MakeVisible(brightness_value_label, visible);
-    GooeyWidget_MakeVisible(system_title, visible);
-    GooeyWidget_MakeVisible(battery_label, visible);
-    GooeyWidget_MakeVisible(network_label, visible);
+void update_time_date()
+{
+    time_t raw_time;
+    struct tm *time_info;
+    char time_buffer[64];
+    char date_buffer[64];
+
+    time(&raw_time);
+    time_info = localtime(&raw_time);
+
+    strftime(time_buffer, sizeof(time_buffer), "%I:%M:%S %p", time_info);
+    strftime(date_buffer, sizeof(date_buffer), "%A, %B %d", time_info);
+
+    if (time_label)
+        GooeyLabel_SetText(time_label, time_buffer);
+    if (date_label)
+        GooeyLabel_SetText(date_label, date_buffer);
+}
+
+void *time_update_thread(void *arg)
+{
+    printf("Time update thread started\n");
+
+    while (time_thread_running)
+    {
+        update_time_date();
+
+        static int counter = 0;
+        if (counter++ >= 5)
+        {
+            refresh_system_info();
+            counter = 0;
+        }
+        sleep(1);
+    }
+
+    printf("Time update thread stopped\n");
+    return NULL;
 }
 
 void toggle_control_panel()
@@ -563,7 +1132,7 @@ void create_control_panel()
     current_y += 50;
     settings_label = GooeyLabel_Create("Visit settings:", 0.3f, label_x, current_y + 18);
     GooeyLabel_SetColor(settings_label, 0xCCCCCC);
-    settings_button = GooeyButton_Create("Refresh", slider_x, current_y, 100, 30, refresh_system_info);
+    settings_button = GooeyButton_Create("Open", slider_x, current_y, 100, 30, run_systemsettings);
 
     GooeyWindow_RegisterWidget(win, settings_button);
     GooeyWindow_RegisterWidget(win, settings_label);
@@ -594,6 +1163,177 @@ void destroy_control_panel()
     set_control_panel_visibility(0);
 }
 
+void set_control_panel_visibility(int visible)
+{
+    if (!control_panel_bg)
+        return;
+
+    GooeyWidget_MakeVisible(control_panel_bg, visible);
+    GooeyWidget_MakeVisible(panel_title, visible);
+    GooeyWidget_MakeVisible(wifi_label, visible);
+    GooeyWidget_MakeVisible(wifi_switch, visible);
+    GooeyWidget_MakeVisible(bluetooth_label, visible);
+    GooeyWidget_MakeVisible(bluetooth_switch, visible);
+    GooeyWidget_MakeVisible(airplane_label, visible);
+    GooeyWidget_MakeVisible(airplane_switch, visible);
+    GooeyWidget_MakeVisible(settings_button, visible);
+    GooeyWidget_MakeVisible(settings_label, visible);
+    GooeyWidget_MakeVisible(settings_title, visible);
+    GooeyWidget_MakeVisible(volume_label, visible);
+    GooeyWidget_MakeVisible(volume_slider, visible);
+    GooeyWidget_MakeVisible(volume_value_label, visible);
+    GooeyWidget_MakeVisible(brightness_label, visible);
+    GooeyWidget_MakeVisible(brightness_slider, visible);
+    GooeyWidget_MakeVisible(brightness_value_label, visible);
+    GooeyWidget_MakeVisible(system_title, visible);
+    GooeyWidget_MakeVisible(battery_label, visible);
+    GooeyWidget_MakeVisible(network_label, visible);
+}
+
+void wifi_switch_callback(bool value)
+{
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "nmcli radio wifi %s", value ? "on" : "off");
+    execute_system_command(cmd);
+    printf("WiFi %s\n", value ? "Enabled" : "Disabled");
+
+    get_network_status();
+    if (network_label)
+    {
+        GooeyLabel_SetText(network_label, network_status);
+    }
+    update_status_icons();
+}
+
+void bluetooth_switch_callback(bool value)
+{
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "bluetoothctl power %s", value ? "on" : "off");
+    execute_system_command(cmd);
+    printf("Bluetooth %s\n", value ? "Enabled" : "Disabled");
+    update_status_icons();
+}
+
+void airplane_switch_callback(bool value)
+{
+    printf("Airplane Mode %s\n", value ? "Enabled" : "Disabled");
+
+    if (value)
+    {
+        if (wifi_switch && GooeySwitch_GetState(wifi_switch))
+        {
+            wifi_switch_callback(false);
+            GooeySwitch_Toggle(wifi_switch);
+        }
+        if (bluetooth_switch && GooeySwitch_GetState(bluetooth_switch))
+        {
+            bluetooth_switch_callback(false);
+            GooeySwitch_Toggle(bluetooth_switch);
+        }
+    }
+    else
+    {
+        if (wifi_switch && !GooeySwitch_GetState(wifi_switch))
+        {
+            wifi_switch_callback(true);
+            GooeySwitch_Toggle(wifi_switch);
+        }
+    }
+    update_status_icons();
+}
+
+void volume_slider_callback(long value)
+{
+    current_volume = value;
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "pactl set-sink-volume @DEFAULT_SINK@ %ld%%", value);
+    execute_system_command(cmd);
+    printf("Volume set to: %ld%%\n", value);
+
+    if (volume_value_label)
+    {
+        char volume_text[32];
+        snprintf(volume_text, sizeof(volume_text), "%ld%%", value);
+        GooeyLabel_SetText(volume_value_label, volume_text);
+    }
+    update_status_icons();
+}
+
+void brightness_slider_callback(long value)
+{
+    current_brightness = value;
+    int max_bright = get_max_brightness();
+    int actual_level = (value * max_bright) / 100;
+
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "echo %d | sudo tee /sys/class/backlight/*/brightness >/dev/null 2>&1", actual_level);
+    execute_system_command(cmd);
+    printf("Brightness set to: %ld%%\n", value);
+
+    if (brightness_value_label)
+    {
+        char brightness_text[32];
+        snprintf(brightness_text, sizeof(brightness_text), "%ld%%", value);
+        GooeyLabel_SetText(brightness_value_label, brightness_text);
+    }
+}
+
+void mute_audio_callback()
+{
+    execute_system_command("pactl set-sink-mute @DEFAULT_SINK@ toggle");
+    printf("Audio mute toggled\n");
+    update_status_icons();
+}
+
+void refresh_system_info()
+{
+    printf("Refreshing system information...\n");
+
+    battery_level = get_battery_level();
+    if (battery_label)
+    {
+        char battery_text[32];
+        snprintf(battery_text, sizeof(battery_text), "Battery: %d%%", battery_level);
+        GooeyLabel_SetText(battery_label, battery_text);
+    }
+
+    get_network_status();
+    if (network_label)
+    {
+        GooeyLabel_SetText(network_label, network_status);
+    }
+
+    int system_volume = get_system_volume();
+    if (system_volume != current_volume && volume_slider)
+    {
+        current_volume = system_volume;
+        volume_slider->value = system_volume;
+        if (volume_value_label)
+        {
+            char volume_text[32];
+            snprintf(volume_text, sizeof(volume_text), "%d%%", system_volume);
+            GooeyLabel_SetText(volume_value_label, volume_text);
+        }
+    }
+
+    int system_brightness = get_system_brightness();
+    int max_bright = get_max_brightness();
+    int brightness_percent = (system_brightness * 100) / max_bright;
+    if (brightness_percent != current_brightness && brightness_slider)
+    {
+        current_brightness = brightness_percent;
+        brightness_slider->value = brightness_percent;
+        if (brightness_value_label)
+        {
+            char brightness_text[32];
+            snprintf(brightness_text, sizeof(brightness_text), "%d%%", brightness_percent);
+            GooeyLabel_SetText(brightness_value_label, brightness_text);
+        }
+    }
+
+    printf("System info refreshed\n");
+}
+
 void create_status_icons()
 {
     int icon_size = 24;
@@ -617,48 +1357,10 @@ void create_status_icons()
     GooeyWindow_RegisterWidget(win, battery_percent_label);
 }
 
-void update_time_date()
-{
-    time_t raw_time;
-    struct tm *time_info;
-    char time_buffer[64];
-    char date_buffer[64];
-
-    time(&raw_time);
-    time_info = localtime(&raw_time);
-
-    strftime(time_buffer, sizeof(time_buffer), "%I:%M:%S %p", time_info);
-    strftime(date_buffer, sizeof(date_buffer), "%A, %B %d", time_info);
-
-    if (time_label)
-        GooeyLabel_SetText(time_label, time_buffer);
-    if (date_label)
-        GooeyLabel_SetText(date_label, date_buffer);
-}
-
-void *time_update_thread(void *arg)
-{
-    printf("Time update thread started\n");
-
-    while (time_thread_running)
-    {
-        update_time_date();
-
-        static int counter = 0;
-        if (counter++ >= 5)
-        {
-            refresh_system_info();
-            counter = 0;
-        }
-        sleep(1);
-    }
-
-    printf("Time update thread stopped\n");
-    return NULL;
-}
-
 int main(int argc, char **argv)
 {
+    printf("Starting Gooey Desktop...\n");
+
     Gooey_Init();
     screen_info = get_screen_resolution();
     if (screen_info.width == 0 || screen_info.height == 0)
@@ -671,14 +1373,12 @@ int main(int argc, char **argv)
     win = GooeyWindow_Create("Gooey Desktop", screen_info.width, screen_info.height, true);
 
     GooeyImage *wallpaper = GooeyImage_Create("assets/bg.png", 0, 50, screen_info.width, screen_info.height - 50, NULL);
-    GooeyCanvas *canvas = GooeyCanvas_Create(0, 0, screen_info.width, screen_info.height, NULL);
+    GooeyCanvas *canvas = GooeyCanvas_Create(0, 0, screen_info.width, 50, NULL);
     GooeyCanvas_DrawRectangle(canvas, 0, 0, screen_info.width, 50, 0x222222, true, 1.0f, true, 1.0f);
     GooeyCanvas_DrawLine(canvas, 50, 0, 50, 50, 0xFFFFFF);
 
     GooeyImage *apps_icon = GooeyImage_Create("assets/apps.png", 10, 10, 30, 30, run_app_menu);
     GooeyImage *settings_icon = GooeyImage_Create("assets/settings.png", screen_info.width - 210, 10, 30, 30, toggle_control_panel);
-    GooeyImage *test_app = GooeyImage_Create("assets/test_app.png", 65, 10, 30, 30, NULL);
-
     time_label = GooeyLabel_Create("Loading...", 0.3f, screen_info.width - 150, 18);
     GooeyLabel_SetColor(time_label, 0xFFFFFF);
     date_label = GooeyLabel_Create("Loading...", 0.25f, screen_info.width - 150, 35);
@@ -690,12 +1390,12 @@ int main(int argc, char **argv)
     GooeyWindow_RegisterWidget(win, wallpaper);
     GooeyWindow_RegisterWidget(win, apps_icon);
     GooeyWindow_RegisterWidget(win, settings_icon);
-    GooeyWindow_RegisterWidget(win, test_app);
     GooeyWindow_RegisterWidget(win, time_label);
     GooeyWindow_RegisterWidget(win, date_label);
 
     init_system_settings();
     update_status_icons();
+    update_time_date();
 
     gthread_t time_thread;
     if (glps_thread_create(&time_thread, NULL, time_update_thread, NULL) != 0)
@@ -707,20 +1407,68 @@ int main(int argc, char **argv)
         printf("Time update thread created successfully\n");
     }
 
-    update_time_date();
+    gthread_t dbus_thread;
+    if (init_dbus_connection())
+    {
+        if (glps_thread_create(&dbus_thread, NULL, dbus_monitor_thread, NULL) != 0)
+        {
+            fprintf(stderr, "Failed to create DBus monitor thread\n");
+        }
+        else
+        {
+            printf("DBus monitor thread created successfully\n");
 
-    printf("Desktop started with Linux system control panel\n");
+            usleep(100000);
+            request_window_list();
+        }
+    }
+    else
+    {
+        fprintf(stderr, "DBus initialization failed, window management disabled\n");
+    }
+
+    dock_width = screen_info.width * 0.4;
+    dock_height = screen_info.height * 0.07;
+    if (dock_width < 300)
+        dock_width = 300;
+    if (dock_height < 40)
+        dock_height = 40;
+    dock_x = (screen_info.width - dock_width) / 2;
+    dock_y = screen_info.height - dock_height - (screen_info.height * 0.10);
+    if (dock_y < 0)
+        dock_y = 0;
+
+    dock_bg = GooeyImage_Create("assets/dock.png", dock_x, dock_y, dock_width, dock_height, NULL);
+    GooeyWindow_RegisterWidget(win, dock_bg);
+
+    printf("Desktop started successfully\n");
+    printf("Screen resolution: %dx%d\n", screen_info.width, screen_info.height);
     printf("Click the settings icon to toggle control panel visibility\n");
-    printf("Note: Brightness control may require sudo permissions\n");
-
+    printf("Open apps will appear in the dock at the bottom\n");
+    run_systemsettings();
     GooeyWindow_Run(1, win);
 
-    printf("Stopping time update thread...\n");
+    printf("Stopping threads...\n");
     time_thread_running = 0;
+    dbus_thread_running = 0;
+
     glps_thread_join(time_thread, NULL);
+    if (dbus_initialized)
+    {
+        glps_thread_join(dbus_thread, NULL);
+    }
+
+    cleanup_dbus();
+    cleanup_dock_app_buttons();
+
+    for (int i = 0; i < managed_windows_count; i++)
+    {
+        free(managed_windows[i].title);
+        free(managed_windows[i].state);
+    }
+    free(managed_windows);
 
     GooeyWindow_Cleanup(1, win);
-    cleanup_screen_info(&screen_info);
     printf("Desktop shutdown complete\n");
     return 0;
 }

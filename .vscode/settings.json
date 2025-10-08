@@ -2,6 +2,10 @@
     "files.associations": {
         "x.h": "c",
         "unistd.h": "c",
-        "types.h": "c"
+        "types.h": "c",
+        "wait.h": "c",
+        "system_error": "c",
+        "string.h": "c",
+        "glps_thread.h": "c"
     }
 }

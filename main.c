@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include "GLPS/glps_thread.h"
 
 int main()
 {
