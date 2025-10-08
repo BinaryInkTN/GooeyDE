@@ -6,6 +6,8 @@
         "wait.h": "c",
         "system_error": "c",
         "string.h": "c",
-        "glps_thread.h": "c"
+        "glps_thread.h": "c",
+        "resolution_helper.h": "c",
+        "stdarg.h": "c"
     }
 }

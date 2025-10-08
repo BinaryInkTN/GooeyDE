@@ -14,12 +14,19 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <GLPS/glps_thread.h>
+#include <sys/select.h>
 
 static PrecomputedAtoms atoms;
 
 static Window *opened_windows = NULL;
 static int opened_windows_count = 0;
 static int opened_windows_capacity = 0;
+static int dbus_thread_running = 0;
+static gthread_t dbus_thread;
+static gthread_mutex_t dbus_mutex;
+static int window_list_update_pending = 0;
+static int pending_x_flush = 0;
 
 static void InitializeAtoms(Display *display);
 static int InitializeMultiMonitor(GooeyShellState *state);
@@ -64,6 +71,9 @@ static void SendWindowListThroughDBus(GooeyShellState *state);
 static void SendWindowStateThroughDBus(GooeyShellState *state, Window window, const char *st);
 static int ShouldExcludeFromTaskbar(GooeyShellState *state, WindowNode *node);
 static void HandleDBusWindowCommand(GooeyShellState *state, DBusMessage *msg);
+static void ScheduleWindowListUpdate(GooeyShellState *state);
+static void OptimizedXFlush(GooeyShellState *state);
+static void ProcessPendingEvents(GooeyShellState *state);
 
 static void LogError(const char *message, ...)
 {
@@ -91,6 +101,120 @@ static void SafeXFree(void *data)
         XFree(data);
 }
 
+static void ScheduleWindowListUpdate(GooeyShellState *state)
+{
+    if (!window_list_update_pending)
+    {
+        window_list_update_pending = 1;
+
+        SendWindowListThroughDBus(state);
+        window_list_update_pending = 0;
+    }
+}
+
+static void OptimizedXFlush(GooeyShellState *state)
+{
+    if (!pending_x_flush)
+    {
+        pending_x_flush = 1;
+        XFlush(state->display);
+        pending_x_flush = 0;
+    }
+}
+
+static void ProcessPendingEvents(GooeyShellState *state)
+{
+
+    while (XPending(state->display))
+    {
+        XEvent ev;
+        XNextEvent(state->display, &ev);
+
+        XPutBackEvent(state->display, &ev);
+        break;
+    }
+}
+
+static void ProcessDBusMessage(GooeyShellState *state, DBusMessage *msg)
+{
+    if (!state || !msg)
+        return;
+
+    if (dbus_message_is_method_call(msg, "dev.binaryink.gshell", "GetWindowList"))
+    {
+        DBusMessage *reply = dbus_message_new_method_return(msg);
+        DBusMessageIter args, array_iter;
+        char window_id[64];
+        int i;
+
+        dbus_message_iter_init_append(reply, &args);
+
+        if (!dbus_message_iter_open_container(&args, DBUS_TYPE_ARRAY,
+                                              DBUS_TYPE_STRING_AS_STRING,
+                                              &array_iter))
+        {
+            dbus_message_unref(reply);
+            return;
+        }
+
+        for (i = 0; i < opened_windows_count; i++)
+        {
+            WindowNode *node = FindWindowNodeByFrame(state, opened_windows[i]);
+            if (node && !ShouldExcludeFromTaskbar(state, node))
+            {
+                snprintf(window_id, sizeof(window_id), "%lu", opened_windows[i]);
+                const char *window_str = window_id;
+                dbus_message_iter_append_basic(&array_iter, DBUS_TYPE_STRING, &window_str);
+            }
+        }
+
+        dbus_message_iter_close_container(&args, &array_iter);
+
+        dbus_connection_send(state->dbus_connection, reply, NULL);
+        dbus_connection_flush(state->dbus_connection);
+        dbus_message_unref(reply);
+    }
+    else if (dbus_message_is_method_call(msg, "dev.binaryink.gshell", "minimize") ||
+             dbus_message_is_method_call(msg, "dev.binaryink.gshell", "RestoreWindow") ||
+             dbus_message_is_method_call(msg, "dev.binaryink.gshell", "CloseWindow") ||
+             dbus_message_is_method_call(msg, "dev.binaryink.gshell", "SendWindowCommand"))
+    {
+        HandleDBusWindowCommand(state, msg);
+    }
+}
+static void *DBusListenerThread(void *arg)
+{
+    GooeyShellState *state = (GooeyShellState *)arg;
+
+    if (!state || !state->dbus_connection || !state->is_dbus_init)
+    {
+        return NULL;
+    }
+
+    LogInfo("DBus listener thread started");
+
+    while (dbus_thread_running && state->is_dbus_init)
+    {
+        if (!dbus_connection_read_write(state->dbus_connection, 10))
+        {
+            usleep(10000);
+            continue;
+        }
+
+        DBusMessage *msg;
+        while ((msg = dbus_connection_pop_message(state->dbus_connection)) != NULL)
+        {
+            ProcessDBusMessage(state, msg);
+            dbus_message_unref(msg);
+        }
+
+        usleep(5000);
+    }
+
+    LogInfo("DBus listener thread stopped");
+    return NULL;
+}
+
 static void SetupDBUS(GooeyShellState *state)
 {
     int ret;
@@ -99,29 +223,39 @@ static void SetupDBUS(GooeyShellState *state)
     state->dbus_connection = dbus_bus_get(DBUS_BUS_SESSION, &state->dbus_error);
     if (dbus_error_is_set(&state->dbus_error))
     {
-        LogInfo("DBus Error: %s", state->dbus_error.message);
         dbus_error_free(&state->dbus_error);
     }
     if (!state->dbus_connection)
     {
-        LogInfo("Failed to get DBus connection");
         return;
     }
 
     ret = dbus_bus_request_name(state->dbus_connection, "dev.binaryink.gshell", DBUS_NAME_FLAG_REPLACE_EXISTING, &state->dbus_error);
     if (dbus_error_is_set(&state->dbus_error))
     {
-        LogInfo("DBus Error: %s", state->dbus_error.message);
         dbus_error_free(&state->dbus_error);
     }
     if (ret != DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER)
     {
-        LogInfo("Failed to acquire DBus name");
         return;
     }
 
+    dbus_bus_add_match(state->dbus_connection,
+                       "type='method_call',interface='dev.binaryink.gshell'",
+                       &state->dbus_error);
+
+    if (dbus_error_is_set(&state->dbus_error))
+    {
+        dbus_error_free(&state->dbus_error);
+    }
+
     state->is_dbus_init = true;
-    LogInfo("DBus initialized successfully");
+
+    dbus_thread_running = 1;
+    if (glps_thread_create(&dbus_thread, NULL, DBusListenerThread, state) != 0)
+    {
+        state->is_dbus_init = false;
+    }
 }
 
 static int ShouldExcludeFromTaskbar(GooeyShellState *state, WindowNode *node)
@@ -136,7 +270,6 @@ static int ShouldExcludeFromTaskbar(GooeyShellState *state, WindowNode *node)
 
     if (node->is_fullscreen_app)
     {
-
         if (node->title)
         {
             char lower_title[256];
@@ -171,23 +304,12 @@ static void SendWindowListThroughDBus(GooeyShellState *state)
     DBusMessageIter args, array_iter;
     char window_id[64];
     int i;
-    int visible_windows_count = 0;
-
-    for (i = 0; i < opened_windows_count; i++)
-    {
-        WindowNode *node = FindWindowNodeByFrame(state, opened_windows[i]);
-        if (node && !ShouldExcludeFromTaskbar(state, node))
-        {
-            visible_windows_count++;
-        }
-    }
 
     message = dbus_message_new_signal("/dev/binaryink/gshell",
                                       "dev.binaryink.gshell",
                                       "WindowListUpdated");
     if (!message)
     {
-        LogError("Failed to create DBus message");
         return;
     }
 
@@ -197,7 +319,6 @@ static void SendWindowListThroughDBus(GooeyShellState *state)
                                           DBUS_TYPE_STRING_AS_STRING,
                                           &array_iter))
     {
-        LogError("Failed to open array container");
         dbus_message_unref(message);
         return;
     }
@@ -209,31 +330,14 @@ static void SendWindowListThroughDBus(GooeyShellState *state)
         {
             snprintf(window_id, sizeof(window_id), "%lu", opened_windows[i]);
             const char *window_str = window_id;
-
-            if (!dbus_message_iter_append_basic(&array_iter, DBUS_TYPE_STRING, &window_str))
-            {
-                LogError("Failed to append window to array");
-                break;
-            }
+            dbus_message_iter_append_basic(&array_iter, DBUS_TYPE_STRING, &window_str);
         }
     }
 
-    if (!dbus_message_iter_close_container(&args, &array_iter))
-    {
-        LogError("Failed to close array container");
-        dbus_message_unref(message);
-        return;
-    }
+    dbus_message_iter_close_container(&args, &array_iter);
 
-    if (!dbus_connection_send(state->dbus_connection, message, NULL))
-    {
-        LogError("Failed to send DBus message");
-    }
-    else
-    {
-        dbus_connection_flush(state->dbus_connection);
-        LogInfo("Sent window list through DBus (%d windows, %d visible)", opened_windows_count, visible_windows_count);
-    }
+    dbus_connection_send(state->dbus_connection, message, NULL);
+    dbus_connection_flush(state->dbus_connection);
 
     dbus_message_unref(message);
 }
@@ -254,7 +358,6 @@ static void SendWindowStateThroughDBus(GooeyShellState *state, Window window, co
                                       "WindowStateChanged");
     if (!message)
     {
-        LogError("Failed to create DBus message");
         return;
     }
 
@@ -262,29 +365,12 @@ static void SendWindowStateThroughDBus(GooeyShellState *state, Window window, co
 
     snprintf(window_id, sizeof(window_id), "%lu", window);
     const char *window_str = window_id;
-    if (!dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &window_str))
-    {
-        LogError("Failed to append window ID");
-        dbus_message_unref(message);
-        return;
-    }
+    dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &window_str);
 
-    if (!dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &state_str))
-    {
-        LogError("Failed to append window state");
-        dbus_message_unref(message);
-        return;
-    }
+    dbus_message_iter_append_basic(&args, DBUS_TYPE_STRING, &state_str);
 
-    if (!dbus_connection_send(state->dbus_connection, message, NULL))
-    {
-        LogError("Failed to send DBus message");
-    }
-    else
-    {
-        dbus_connection_flush(state->dbus_connection);
-        LogInfo("Sent window state through DBus: window %lu -> %s", window, state_str);
-    }
+    dbus_connection_send(state->dbus_connection, message, NULL);
+    dbus_connection_flush(state->dbus_connection);
 
     dbus_message_unref(message);
 }
@@ -301,7 +387,6 @@ static void HandleDBusWindowCommand(GooeyShellState *state, DBusMessage *msg)
     DBusMessageIter iter;
     if (!dbus_message_iter_init(msg, &iter))
     {
-        LogError("No arguments in DBus method call");
         return;
     }
 
@@ -324,42 +409,23 @@ static void HandleDBusWindowCommand(GooeyShellState *state, DBusMessage *msg)
 
     if (!window_id_str)
     {
-        LogError("No window ID in DBus command");
         return;
     }
 
     Window window = (Window)strtoul(window_id_str, NULL, 10);
     if (window == 0)
     {
-        LogError("Invalid window ID: %s", window_id_str);
         return;
     }
 
     WindowNode *node = FindWindowNodeByFrame(state, window);
     if (!node)
     {
-        LogError("Window not found: %lu", window);
         return;
     }
 
-    if (strcmp(method, "MinimizeWindow") == 0)
+    if (strcmp(method, "SendWindowCommand") == 0 && command)
     {
-        LogInfo("DBus: Minimizing window %lu", window);
-        MinimizeWindow(state, node);
-    }
-    else if (strcmp(method, "RestoreWindow") == 0)
-    {
-        LogInfo("DBus: Restoring window %lu", window);
-        RestoreWindow(state, node);
-    }
-    else if (strcmp(method, "CloseWindow") == 0)
-    {
-        LogInfo("DBus: Closing window %lu", window);
-        CloseWindow(state, node);
-    }
-    else if (strcmp(method, "SendWindowCommand") == 0 && command)
-    {
-        LogInfo("DBus: Sending command '%s' to window %lu", command, window);
         if (strcmp(command, "minimize") == 0)
         {
             MinimizeWindow(state, node);
@@ -372,14 +438,14 @@ static void HandleDBusWindowCommand(GooeyShellState *state, DBusMessage *msg)
         {
             CloseWindow(state, node);
         }
-        else
-        {
-            LogError("Unknown window command: %s", command);
-        }
     }
-    else
+    else if (strcmp(method, "RestoreWindow") == 0)
     {
-        LogError("Unknown DBus method: %s", method);
+        RestoreWindow(state, node);
+    }
+    else if (strcmp(method, "CloseWindow") == 0)
+    {
+        CloseWindow(state, node);
     }
 
     DBusMessage *reply = dbus_message_new_method_return(msg);
@@ -404,7 +470,6 @@ static void ListenForDBUSSignals(GooeyShellState *state)
 
     if (dbus_error_is_set(&state->dbus_error))
     {
-        LogInfo("DBus Error adding match: %s", state->dbus_error.message);
         dbus_error_free(&state->dbus_error);
     }
 
@@ -447,10 +512,8 @@ static void ListenForDBUSSignals(GooeyShellState *state)
             dbus_connection_send(state->dbus_connection, reply, NULL);
             dbus_connection_flush(state->dbus_connection);
             dbus_message_unref(reply);
-
-            LogInfo("Sent window list in response to GetWindowList");
         }
-        else if (dbus_message_is_method_call(msg, "dev.binaryink.gshell", "MinimizeWindow") ||
+        else if (dbus_message_is_method_call(msg, "dev.binaryink.gshell", "minimize") ||
                  dbus_message_is_method_call(msg, "dev.binaryink.gshell", "RestoreWindow") ||
                  dbus_message_is_method_call(msg, "dev.binaryink.gshell", "CloseWindow") ||
                  dbus_message_is_method_call(msg, "dev.binaryink.gshell", "SendWindowCommand"))
@@ -465,7 +528,6 @@ static void ListenForDBUSSignals(GooeyShellState *state)
             if (DBUS_TYPE_STRING == dbus_message_iter_get_arg_type(&args))
             {
                 dbus_message_iter_get_basic(&args, &window_id);
-                printf("Window opened: %s\n", window_id);
             }
 
             DBusMessage *reply = dbus_message_new_method_return(msg);
@@ -481,7 +543,6 @@ static int ValidateWindowState(GooeyShellState *state)
 {
     if (!state || !state->display)
     {
-        LogError("Invalid state or display");
         return 0;
     }
     return 1;
@@ -495,7 +556,6 @@ static void AddToOpenedWindows(Window window)
         Window *new_array = realloc(opened_windows, new_capacity * sizeof(Window));
         if (!new_array)
         {
-            LogError("Failed to realloc opened_windows array");
             return;
         }
         opened_windows = new_array;
@@ -503,7 +563,6 @@ static void AddToOpenedWindows(Window window)
     }
 
     opened_windows[opened_windows_count++] = window;
-    LogInfo("Added window %lu to opened_windows array (count: %d)", window, opened_windows_count);
 }
 
 static void RemoveFromOpenedWindows(Window window)
@@ -512,13 +571,11 @@ static void RemoveFromOpenedWindows(Window window)
     {
         if (opened_windows[i] == window)
         {
-
             for (int j = i; j < opened_windows_count - 1; j++)
             {
                 opened_windows[j] = opened_windows[j + 1];
             }
             opened_windows_count--;
-            LogInfo("Removed window %lu from opened_windows array (count: %d)", window, opened_windows_count);
             return;
         }
     }
@@ -569,8 +626,6 @@ static int InitializeMultiMonitor(GooeyShellState *state)
     int event_base, error_base;
     if (!XRRQueryExtension(state->display, &event_base, &error_base))
     {
-        LogInfo("XRandR extension not available, using single monitor");
-
         state->monitor_info.monitors = malloc(sizeof(Monitor));
         state->monitor_info.num_monitors = 1;
         state->monitor_info.primary_monitor = 0;
@@ -580,19 +635,12 @@ static int InitializeMultiMonitor(GooeyShellState *state)
         state->monitor_info.monitors[0].width = DisplayWidth(state->display, state->screen);
         state->monitor_info.monitors[0].height = DisplayHeight(state->display, state->screen);
         state->monitor_info.monitors[0].number = 0;
-
-        LogInfo("Single monitor: %dx%d at %d,%d",
-                state->monitor_info.monitors[0].width,
-                state->monitor_info.monitors[0].height,
-                state->monitor_info.monitors[0].x,
-                state->monitor_info.monitors[0].y);
         return 1;
     }
 
     XRRScreenResources *resources = XRRGetScreenResources(state->display, state->root);
     if (!resources)
     {
-        LogError("Failed to get screen resources");
         return 0;
     }
 
@@ -622,10 +670,6 @@ static int InitializeMultiMonitor(GooeyShellState *state)
                 mon->height = crtc_info->height;
                 mon->number = state->monitor_info.num_monitors;
 
-                LogInfo("Monitor %d: %s %dx%d at %d,%d",
-                        state->monitor_info.num_monitors, output_info->name,
-                        mon->width, mon->height, mon->x, mon->y);
-
                 state->monitor_info.num_monitors++;
             }
             if (crtc_info)
@@ -638,7 +682,6 @@ static int InitializeMultiMonitor(GooeyShellState *state)
 
     if (state->monitor_info.num_monitors == 0)
     {
-
         free(state->monitor_info.monitors);
         state->monitor_info.monitors = malloc(sizeof(Monitor));
         state->monitor_info.num_monitors = 1;
@@ -649,13 +692,8 @@ static int InitializeMultiMonitor(GooeyShellState *state)
         state->monitor_info.monitors[0].width = DisplayWidth(state->display, state->screen);
         state->monitor_info.monitors[0].height = DisplayHeight(state->display, state->screen);
         state->monitor_info.monitors[0].number = 0;
-
-        LogInfo("Fallback to single monitor: %dx%d",
-                state->monitor_info.monitors[0].width,
-                state->monitor_info.monitors[0].height);
     }
 
-    LogInfo("Detected %d monitors", state->monitor_info.num_monitors);
     return 1;
 }
 
@@ -718,14 +756,13 @@ GooeyShellState *GooeyShell_Init(void)
     GooeyShellState *state = calloc(1, sizeof(GooeyShellState));
     if (!state)
     {
-        LogError("Unable to allocate memory for GooeyShellState");
         return NULL;
     }
+    glps_thread_mutex_init(&dbus_mutex, NULL);
 
     state->display = XOpenDisplay(NULL);
     if (!state->display)
     {
-        LogError("Unable to open X display");
         free(state);
         return NULL;
     }
@@ -744,7 +781,6 @@ GooeyShellState *GooeyShell_Init(void)
 
     if (!InitializeMultiMonitor(state))
     {
-        LogError("Failed to initialize multi-monitor support");
         XCloseDisplay(state->display);
         free(state);
         return NULL;
@@ -755,7 +791,6 @@ GooeyShellState *GooeyShell_Init(void)
     state->gc = XCreateGC(state->display, state->root, 0, NULL);
     if (!state->gc)
     {
-        LogError("Failed to create GC");
         FreeMultiMonitor(state);
         XCloseDisplay(state->display);
         free(state);
@@ -816,7 +851,6 @@ GooeyShellState *GooeyShell_Init(void)
 
     SetupDBUS(state);
 
-    LogInfo("GooeyShell initialized successfully with %d monitors", state->monitor_info.num_monitors);
     return state;
 }
 
@@ -851,13 +885,11 @@ static Cursor CreateCustomCursor(GooeyShellState *state)
             cursor = XcursorFilenameLoadCursor(display, path);
             if (cursor != None)
             {
-                LogInfo("Loaded custom cursor from: %s", path);
                 return cursor;
             }
         }
     }
 
-    LogInfo("Using default cursor");
     return None;
 }
 
@@ -876,7 +908,7 @@ static char *StrDup(const char *str)
     char *new_str = strdup(str);
     if (!new_str)
     {
-        LogError("strdup failed for string of length %zu", strlen(str));
+        return NULL;
     }
     return new_str;
 }
@@ -888,7 +920,6 @@ static void UpdateWindowGeometry(GooeyShellState *state, WindowNode *node)
 
     if (node->is_desktop_app || node->is_fullscreen_app)
     {
-
         Monitor *mon = &state->monitor_info.monitors[node->monitor_number];
         XMoveResizeWindow(state->display, node->frame, mon->x, mon->y, mon->width, mon->height);
         XMoveResizeWindow(state->display, node->client, 0, 0, mon->width, mon->height);
@@ -1136,8 +1167,6 @@ static void SetupDesktopApp(GooeyShellState *state, WindowNode *node)
 
     XLowerWindow(state->display, node->frame);
     state->desktop_app_window = node->frame;
-
-    LogInfo("Setup desktop app on monitor %d: %s", node->monitor_number, node->title);
 }
 
 static void SetupFullscreenApp(GooeyShellState *state, WindowNode *node, int stay_on_top)
@@ -1178,7 +1207,6 @@ static void SetupFullscreenApp(GooeyShellState *state, WindowNode *node, int sta
     }
 
     state->fullscreen_app_window = node->frame;
-    LogInfo("Setup fullscreen app on monitor %d: %s (stay_on_top: %d)", node->monitor_number, node->title, stay_on_top);
 }
 
 static void EnsureDesktopAppStaysInBackground(GooeyShellState *state)
@@ -1214,14 +1242,12 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
 
     if (FindWindowNodeByClient(state, client) != NULL)
     {
-        LogInfo("Window %lu is already managed, ignoring duplicate", client);
         return 0;
     }
 
     XWindowAttributes attr;
     if (XGetWindowAttributes(state->display, client, &attr) == 0)
     {
-        LogError("Failed to get window attributes for client %lu", client);
         return 0;
     }
 
@@ -1234,7 +1260,6 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
 
     if (is_desktop_app)
     {
-
         monitor_number = 0;
         Monitor *mon = &state->monitor_info.monitors[monitor_number];
         frame_width = mon->width;
@@ -1246,7 +1271,6 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
     }
     else
     {
-
         monitor_number = GetMonitorForWindow(state, attr.x, attr.y, client_width, client_height);
         Monitor *mon = &state->monitor_info.monitors[monitor_number];
 
@@ -1263,14 +1287,12 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
 
     if (frame == None)
     {
-        LogError("Failed to create frame window");
         return 0;
     }
 
     WindowNode *new_node = calloc(1, sizeof(WindowNode));
     if (!new_node)
     {
-        LogError("Failed to allocate memory for WindowNode");
         XDestroyWindow(state->display, frame);
         return 0;
     }
@@ -1355,9 +1377,8 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
         DrawTitleBar(state, new_node);
     }
 
-    SendWindowListThroughDBus(state);
+    ScheduleWindowListUpdate(state);
 
-    LogInfo("Created %s window on monitor %d: %s", is_desktop_app ? "desktop" : "regular", monitor_number, new_node->title);
     return 1;
 }
 
@@ -1368,14 +1389,12 @@ static int CreateFullscreenAppWindow(GooeyShellState *state, Window client, int 
 
     if (FindWindowNodeByClient(state, client) != NULL)
     {
-        LogInfo("Window %lu is already managed, ignoring duplicate", client);
         return 0;
     }
 
     XWindowAttributes attr;
     if (XGetWindowAttributes(state->display, client, &attr) == 0)
     {
-        LogError("Failed to get window attributes for client %lu", client);
         return 0;
     }
 
@@ -1388,14 +1407,12 @@ static int CreateFullscreenAppWindow(GooeyShellState *state, Window client, int 
 
     if (frame == None)
     {
-        LogError("Failed to create fullscreen frame window");
         return 0;
     }
 
     WindowNode *new_node = calloc(1, sizeof(WindowNode));
     if (!new_node)
     {
-        LogError("Failed to allocate memory for WindowNode");
         XDestroyWindow(state->display, frame);
         return 0;
     }
@@ -1447,9 +1464,8 @@ static int CreateFullscreenAppWindow(GooeyShellState *state, Window client, int 
     XMapWindow(state->display, client);
     SetupFullscreenApp(state, new_node, stay_on_top);
 
-    SendWindowListThroughDBus(state);
+    ScheduleWindowListUpdate(state);
 
-    LogInfo("Created fullscreen app window on monitor %d: %s", monitor_number, new_node->title);
     return 1;
 }
 
@@ -1494,7 +1510,7 @@ static void RemoveWindow(GooeyShellState *state, Window client)
             XDestroyWindow(state->display, to_free->frame);
             FreeWindowNode(to_free);
 
-            SendWindowListThroughDBus(state);
+            ScheduleWindowListUpdate(state);
             break;
         }
         current = &(*current)->next;
@@ -1670,8 +1686,6 @@ static void CloseWindow(GooeyShellState *state, WindowNode *node)
     if (!node)
         return;
 
-    LogInfo("Closing window: %s", node->title);
-
     if (atoms.wm_protocols != None && atoms.wm_delete_window != None)
     {
         XEvent ev;
@@ -1685,13 +1699,11 @@ static void CloseWindow(GooeyShellState *state, WindowNode *node)
 
         if (XSendEvent(state->display, node->client, False, NoEventMask, &ev))
         {
-            LogInfo("Sent WM_DELETE_WINDOW to client %lu", node->client);
-            XFlush(state->display);
+            OptimizedXFlush(state);
             return;
         }
     }
 
-    LogInfo("Force destroying window");
     XUnmapWindow(state->display, node->frame);
     XUnmapWindow(state->display, node->client);
     RemoveWindow(state, node->client);
@@ -1709,20 +1721,17 @@ static void ToggleFullscreen(GooeyShellState *state, WindowNode *node)
 
     if (node->is_fullscreen)
     {
-
         XMoveResizeWindow(state->display, node->frame,
                           node->x, node->y,
                           node->width + 2 * BORDER_WIDTH,
                           node->height + TITLE_BAR_HEIGHT + 2 * BORDER_WIDTH);
         XResizeWindow(state->display, node->client, node->width, node->height);
         node->is_fullscreen = False;
-        LogInfo("Window %s restored from fullscreen", node->title);
 
         SendWindowStateThroughDBus(state, node->frame, "restored");
     }
     else
     {
-
         XWindowAttributes attr;
         if (XGetWindowAttributes(state->display, node->frame, &attr))
         {
@@ -1738,7 +1747,6 @@ static void ToggleFullscreen(GooeyShellState *state, WindowNode *node)
                       mon->width - 2 * BORDER_WIDTH,
                       mon->height - TITLE_BAR_HEIGHT - 2 * BORDER_WIDTH);
         node->is_fullscreen = True;
-        LogInfo("Window %s set to fullscreen on monitor %d", node->title, monitor_number);
 
         SendWindowStateThroughDBus(state, node->frame, "fullscreen");
     }
@@ -1747,32 +1755,6 @@ static void ToggleFullscreen(GooeyShellState *state, WindowNode *node)
     {
         DrawTitleBar(state, node);
     }
-}
-
-static void MinimizeWindow(GooeyShellState *state, WindowNode *node)
-{
-    if (!node || node->is_desktop_app || node->is_fullscreen_app)
-        return;
-
-    LogInfo("Minimizing window: %s", node->title);
-    XUnmapWindow(state->display, node->frame);
-    XUnmapWindow(state->display, node->client);
-    node->is_minimized = True;
-
-    SendWindowStateThroughDBus(state, node->frame, "minimized");
-}
-
-static void RestoreWindow(GooeyShellState *state, WindowNode *node)
-{
-    if (!node || node->is_desktop_app || node->is_fullscreen_app)
-        return;
-
-    LogInfo("Restoring window: %s", node->title);
-    XMapWindow(state->display, node->frame);
-    XMapWindow(state->display, node->client);
-    node->is_minimized = False;
-
-    SendWindowStateThroughDBus(state, node->frame, "restored");
 }
 
 static void HandleButtonPress(GooeyShellState *state, XButtonEvent *ev)
@@ -1796,26 +1778,25 @@ static void HandleButtonPress(GooeyShellState *state, XButtonEvent *ev)
     {
         if (button_area == 1)
         {
-            LogInfo("Close button clicked");
             CloseWindow(state, node);
             return;
         }
         else if (button_area == 2)
         {
-            LogInfo("Maximize button clicked");
             ToggleFullscreen(state, node);
             return;
         }
         else if (button_area == 3)
         {
-            LogInfo("Minimize button clicked");
-            MinimizeWindow(state, node);
+            if (!node->is_minimized)
+            {
+                MinimizeWindow(state, node);
+            }
             return;
         }
 
         if (resize_area > 0)
         {
-            LogInfo("Resize border clicked (area: %d)", resize_area);
             state->is_resizing = True;
             state->drag_window = ev->window;
             state->drag_start_x = ev->x_root;
@@ -1840,7 +1821,6 @@ static void HandleButtonPress(GooeyShellState *state, XButtonEvent *ev)
                              GrabModeAsync, GrabModeAsync,
                              None, resize_cursor, CurrentTime) != GrabSuccess)
             {
-                LogError("Failed to grab pointer for resize");
                 state->is_resizing = False;
             }
 
@@ -1851,7 +1831,6 @@ static void HandleButtonPress(GooeyShellState *state, XButtonEvent *ev)
         }
         else if (ev->y < TITLE_BAR_HEIGHT + BORDER_WIDTH && button_area == 0)
         {
-            LogInfo("Titlebar click");
             state->is_dragging = True;
             state->drag_window = ev->window;
             state->drag_start_x = ev->x_root;
@@ -1871,14 +1850,12 @@ static void HandleButtonPress(GooeyShellState *state, XButtonEvent *ev)
                              GrabModeAsync, GrabModeAsync,
                              None, state->move_cursor, CurrentTime) != GrabSuccess)
             {
-                LogError("Failed to grab pointer for move");
                 state->is_dragging = False;
             }
         }
     }
     else if (ev->button == Button3 && ev->y < TITLE_BAR_HEIGHT + BORDER_WIDTH)
     {
-        LogInfo("Titlebar right-click - toggling fullscreen");
         ToggleFullscreen(state, node);
     }
 
@@ -1890,7 +1867,6 @@ static void HandleButtonRelease(GooeyShellState *state, XButtonEvent *ev)
 {
     if ((state->is_dragging || state->is_resizing) && ev->button == Button1)
     {
-        LogInfo("Ending drag/resize");
         state->is_dragging = False;
         state->is_resizing = False;
 
@@ -2012,7 +1988,6 @@ static void ReapZombieProcesses(void)
     {
     }
 }
-
 void GooeyShell_RunEventLoop(GooeyShellState *state)
 {
     if (!ValidateWindowState(state))
@@ -2023,201 +1998,203 @@ void GooeyShell_RunEventLoop(GooeyShellState *state)
 
     while (1)
     {
-
         if (++reap_counter >= 100)
         {
             ReapZombieProcesses();
             reap_counter = 0;
         }
 
-        XNextEvent(state->display, &ev);
-
-        switch (ev.type)
+        while (XPending(state->display))
         {
-        case MapRequest:
-        {
-            Window client = ev.xmaprequest.window;
+            XNextEvent(state->display, &ev);
 
-            if (FindWindowNodeByClient(state, client) != NULL)
+            switch (ev.type)
             {
-                LogInfo("Window %lu is already managed, ignoring duplicate MapRequest", client);
-                break;
-            }
-
-            XWindowAttributes attr;
-            if (XGetWindowAttributes(state->display, client, &attr) == 0)
+            case MapRequest:
             {
-                LogError("Failed to get window attributes for %lu", client);
-                break;
-            }
+                Window client = ev.xmaprequest.window;
 
-            if (attr.override_redirect)
-            {
-                XMapWindow(state->display, client);
-                break;
-            }
-
-            LogInfo("MapRequest for window %lu", client);
-
-            int is_desktop_app = 0;
-            int is_fullscreen_app = 0;
-            int stay_on_top = 0;
-
-            is_desktop_app = IsDesktopAppByProperties(state, client);
-            if (!is_desktop_app)
-            {
-                is_fullscreen_app = IsFullscreenAppByProperties(state, client, &stay_on_top);
-            }
-
-            if (!is_desktop_app && !is_fullscreen_app)
-            {
-                DetectAppTypeByTitleClass(state, client, &is_desktop_app, &is_fullscreen_app, &stay_on_top);
-            }
-
-            if (is_desktop_app)
-            {
-                CreateFrameWindow(state, client, 1);
-            }
-            else if (is_fullscreen_app)
-            {
-                CreateFullscreenAppWindow(state, client, stay_on_top);
-            }
-            else
-            {
-                CreateFrameWindow(state, client, 0);
-            }
-            break;
-        }
-
-        case UnmapNotify:
-            LogInfo("UnmapNotify for window %lu", ev.xunmap.window);
-            break;
-
-        case DestroyNotify:
-            if (ev.xdestroywindow.window != state->root)
-            {
-                LogInfo("DestroyNotify for window %lu", ev.xdestroywindow.window);
-                RemoveWindow(state, ev.xdestroywindow.window);
-            }
-            break;
-
-        case ClientMessage:
-        {
-            if (ev.xclient.message_type == atoms.wm_protocols &&
-                (Atom)ev.xclient.data.l[0] == atoms.wm_delete_window)
-            {
-                WindowNode *node = FindWindowNodeByClient(state, ev.xclient.window);
-                if (node)
+                if (FindWindowNodeByClient(state, client) != NULL)
                 {
-                    LogInfo("Received WM_DELETE_WINDOW for client %lu", ev.xclient.window);
-                    CloseWindow(state, node);
+                    break;
                 }
+
+                XWindowAttributes attr;
+                if (XGetWindowAttributes(state->display, client, &attr) == 0)
+                {
+                    break;
+                }
+
+                if (attr.override_redirect)
+                {
+                    XMapWindow(state->display, client);
+                    break;
+                }
+
+                int is_desktop_app = 0;
+                int is_fullscreen_app = 0;
+                int stay_on_top = 0;
+
+                is_desktop_app = IsDesktopAppByProperties(state, client);
+                if (!is_desktop_app)
+                {
+                    is_fullscreen_app = IsFullscreenAppByProperties(state, client, &stay_on_top);
+                }
+
+                if (!is_desktop_app && !is_fullscreen_app)
+                {
+                    DetectAppTypeByTitleClass(state, client, &is_desktop_app, &is_fullscreen_app, &stay_on_top);
+                }
+
+                if (is_desktop_app)
+                {
+                    CreateFrameWindow(state, client, 1);
+                }
+                else if (is_fullscreen_app)
+                {
+                    CreateFullscreenAppWindow(state, client, stay_on_top);
+                }
+                else
+                {
+                    CreateFrameWindow(state, client, 0);
+                }
+                break;
             }
-            break;
-        }
 
-        case ConfigureRequest:
-        {
-            WindowNode *node = FindWindowNodeByClient(state, ev.xconfigurerequest.window);
-            if (node && !node->is_fullscreen && !node->is_desktop_app && !node->is_fullscreen_app)
+            case UnmapNotify:
+                break;
+
+            case DestroyNotify:
+                if (ev.xdestroywindow.window != state->root)
+                {
+                    RemoveWindow(state, ev.xdestroywindow.window);
+                }
+                break;
+
+            case ClientMessage:
             {
-                node->width = (ev.xconfigurerequest.width > 0) ? ev.xconfigurerequest.width : node->width;
-                node->height = (ev.xconfigurerequest.height > 0) ? ev.xconfigurerequest.height : node->height;
+                if (ev.xclient.message_type == atoms.wm_protocols &&
+                    (Atom)ev.xclient.data.l[0] == atoms.wm_delete_window)
+                {
+                    WindowNode *node = FindWindowNodeByClient(state, ev.xclient.window);
+                    if (node)
+                    {
+                        CloseWindow(state, node);
+                    }
+                }
+                break;
+            }
 
-                UpdateWindowGeometry(state, node);
+            case ConfigureRequest:
+            {
+                WindowNode *node = FindWindowNodeByClient(state, ev.xconfigurerequest.window);
+                if (node && !node->is_fullscreen && !node->is_desktop_app && !node->is_fullscreen_app)
+                {
+                    node->width = (ev.xconfigurerequest.width > 0) ? ev.xconfigurerequest.width : node->width;
+                    node->height = (ev.xconfigurerequest.height > 0) ? ev.xconfigurerequest.height : node->height;
 
-                if (!node->is_titlebar_disabled)
+                    UpdateWindowGeometry(state, node);
+
+                    if (!node->is_titlebar_disabled)
+                    {
+                        DrawTitleBar(state, node);
+                    }
+                }
+                else if (!node)
+                {
+                    XWindowChanges changes;
+                    changes.x = ev.xconfigurerequest.x;
+                    changes.y = ev.xconfigurerequest.y;
+                    changes.width = ev.xconfigurerequest.width;
+                    changes.height = ev.xconfigurerequest.height;
+                    changes.border_width = ev.xconfigurerequest.border_width;
+                    changes.sibling = ev.xconfigurerequest.above;
+                    changes.stack_mode = ev.xconfigurerequest.detail;
+
+                    XConfigureWindow(state->display, ev.xconfigurerequest.window,
+                                     ev.xconfigurerequest.value_mask, &changes);
+                }
+                break;
+            }
+
+            case Expose:
+            {
+                WindowNode *node = FindWindowNodeByFrame(state, ev.xexpose.window);
+                if (node && ev.xexpose.count == 0 && !node->is_titlebar_disabled)
                 {
                     DrawTitleBar(state, node);
                 }
+                break;
             }
-            else if (!node)
+
+            case EnterNotify:
             {
-                XWindowChanges changes;
-                changes.x = ev.xconfigurerequest.x;
-                changes.y = ev.xconfigurerequest.y;
-                changes.width = ev.xconfigurerequest.width;
-                changes.height = ev.xconfigurerequest.height;
-                changes.border_width = ev.xconfigurerequest.border_width;
-                changes.sibling = ev.xconfigurerequest.above;
-                changes.stack_mode = ev.xconfigurerequest.detail;
-
-                XConfigureWindow(state->display, ev.xconfigurerequest.window,
-                                 ev.xconfigurerequest.value_mask, &changes);
-            }
-            break;
-        }
-
-        case Expose:
-        {
-            WindowNode *node = FindWindowNodeByFrame(state, ev.xexpose.window);
-            if (node && ev.xexpose.count == 0 && !node->is_titlebar_disabled)
-            {
-                DrawTitleBar(state, node);
-            }
-            break;
-        }
-
-        case EnterNotify:
-        {
-            WindowNode *node = FindWindowNodeByFrame(state, ev.xcrossing.window);
-            if (node && !node->is_titlebar_disabled)
-            {
-                XDefineCursor(state->display, node->frame, state->custom_cursor);
-            }
-            break;
-        }
-
-        case ButtonPress:
-            HandleButtonPress(state, &ev.xbutton);
-            break;
-
-        case ButtonRelease:
-            HandleButtonRelease(state, &ev.xbutton);
-            break;
-
-        case MotionNotify:
-            HandleMotionNotify(state, &ev.xmotion);
-            break;
-
-        case KeyPress:
-            if (ev.xkey.state & Mod1Mask)
-            {
-                if (ev.xkey.keycode == XKeysymToKeycode(state->display, XK_F4))
+                WindowNode *node = FindWindowNodeByFrame(state, ev.xcrossing.window);
+                if (node && !node->is_titlebar_disabled)
                 {
-                    if (state->focused_window != None)
+                    XDefineCursor(state->display, node->frame, state->custom_cursor);
+                }
+                break;
+            }
+
+            case ButtonPress:
+                HandleButtonPress(state, &ev.xbutton);
+                break;
+
+            case ButtonRelease:
+                HandleButtonRelease(state, &ev.xbutton);
+                break;
+
+            case MotionNotify:
+                HandleMotionNotify(state, &ev.xmotion);
+                break;
+
+            case KeyPress:
+                if (ev.xkey.state & Mod1Mask)
+                {
+                    if (ev.xkey.keycode == XKeysymToKeycode(state->display, XK_F4))
                     {
-                        WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
-                        if (node && !node->is_desktop_app && !node->is_fullscreen_app)
+                        if (state->focused_window != None)
                         {
-                            LogInfo("Closing window via Alt+F4");
-                            CloseWindow(state, node);
+                            WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
+                            if (node && !node->is_desktop_app && !node->is_fullscreen_app)
+                            {
+                                CloseWindow(state, node);
+                            }
+                        }
+                    }
+                    else if (ev.xkey.keycode == XKeysymToKeycode(state->display, XK_F11) ||
+                             ev.xkey.keycode == XKeysymToKeycode(state->display, XK_Return))
+                    {
+                        if (state->focused_window != None)
+                        {
+                            WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
+                            if (node && !node->is_desktop_app && !node->is_fullscreen_app)
+                            {
+                                ToggleFullscreen(state, node);
+                            }
                         }
                     }
                 }
-                else if (ev.xkey.keycode == XKeysymToKeycode(state->display, XK_F11) ||
-                         ev.xkey.keycode == XKeysymToKeycode(state->display, XK_Return))
-                {
-                    if (state->focused_window != None)
-                    {
-                        WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
-                        if (node && !node->is_desktop_app && !node->is_fullscreen_app)
-                        {
-                            LogInfo("Toggling fullscreen via Alt+F11 or Alt+Enter");
-                            ToggleFullscreen(state, node);
-                        }
-                    }
-                }
+                break;
             }
-            break;
+        }
+
+        if (!XPending(state->display))
+        {
+            usleep(5000);
         }
 
         EnsureDesktopAppStaysInBackground(state);
         EnsureFullscreenAppStaysOnTop(state);
-        XFlush(state->display);
+
+        if (pending_x_flush)
+        {
+            XFlush(state->display);
+            pending_x_flush = 0;
+        }
     }
 }
-
 void GooeyShell_AddFullscreenApp(GooeyShellState *state, const char *command, int stay_on_top)
 {
     if (!state || !command)
@@ -2226,7 +2203,6 @@ void GooeyShell_AddFullscreenApp(GooeyShellState *state, const char *command, in
     pid_t pid = fork();
     if (pid == 0)
     {
-
         setenv("GOOEY_FULLSCREEN_APP", "1", 1);
         if (stay_on_top)
         {
@@ -2237,16 +2213,8 @@ void GooeyShell_AddFullscreenApp(GooeyShellState *state, const char *command, in
             close(i);
 
         execlp(command, command, NULL);
-        LogError("Failed to execute: %s (%s)", command, strerror(errno));
         exit(1);
     }
-    else if (pid < 0)
-    {
-        LogError("Failed to fork for command: %s (%s)", command, strerror(errno));
-        return;
-    }
-
-    LogInfo("Launched fullscreen app: %s (PID: %d, stay_on_top: %d)", command, pid, stay_on_top);
 }
 
 void GooeyShell_AddWindow(GooeyShellState *state, const char *command, int desktop_app)
@@ -2257,7 +2225,6 @@ void GooeyShell_AddWindow(GooeyShellState *state, const char *command, int deskt
     pid_t pid = fork();
     if (pid == 0)
     {
-
         if (desktop_app)
         {
             setenv("GOOEY_DESKTOP_APP", "1", 1);
@@ -2267,17 +2234,8 @@ void GooeyShell_AddWindow(GooeyShellState *state, const char *command, int deskt
             close(i);
 
         execlp(command, command, NULL);
-        LogError("Failed to execute: %s (%s)", command, strerror(errno));
         exit(1);
     }
-    else if (pid < 0)
-    {
-        LogError("Failed to fork for command: %s (%s)", command, strerror(errno));
-        return;
-    }
-
-    LogInfo("Launched %s: %s (PID: %d)",
-            desktop_app ? "desktop app" : "regular app", command, pid);
 }
 
 void GooeyShell_ToggleTitlebar(GooeyShellState *state, Window client)
@@ -2300,9 +2258,6 @@ void GooeyShell_ToggleTitlebar(GooeyShellState *state, Window client)
     {
         XClearWindow(state->display, node->frame);
     }
-
-    LogInfo("Titlebar %s for window %s",
-            node->is_titlebar_disabled ? "disabled" : "enabled", node->title);
 }
 
 void GooeyShell_SetTitlebarEnabled(GooeyShellState *state, Window client, int enabled)
@@ -2327,8 +2282,6 @@ void GooeyShell_SetTitlebarEnabled(GooeyShellState *state, Window client, int en
         {
             XClearWindow(state->display, node->frame);
         }
-
-        LogInfo("Titlebar %s for window %s", enabled ? "enabled" : "disabled", node->title);
     }
 }
 
@@ -2357,31 +2310,49 @@ int GooeyShell_IsWindowOpened(GooeyShellState *state, Window window)
 {
     return IsWindowInOpenedWindows(window);
 }
-
-void GooeyShell_MinimizeWindow(GooeyShellState *state, Window client)
+static void MinimizeWindow(GooeyShellState *state, WindowNode *node)
 {
-    if (!ValidateWindowState(state))
+    if (!node || node->is_desktop_app || node->is_fullscreen_app)
         return;
 
-    WindowNode *node = FindWindowNodeByClient(state, client);
-    if (node && !node->is_desktop_app && !node->is_fullscreen_app)
-    {
-        MinimizeWindow(state, node);
-    }
-}
-
-void GooeyShell_RestoreWindow(GooeyShellState *state, Window client)
-{
-    if (!ValidateWindowState(state))
+    if (node->is_minimized)
         return;
 
-    WindowNode *node = FindWindowNodeByClient(state, client);
-    if (node && !node->is_desktop_app && !node->is_fullscreen_app)
-    {
-        RestoreWindow(state, node);
-    }
+    LogInfo("Minimizing window: %s", node->title);
+
+    XWithdrawWindow(state->display, node->frame, state->screen);
+
+    node->is_minimized = True;
+
+    SendWindowStateThroughDBus(state, node->frame, "minimized");
+
+    OptimizedXFlush(state);
 }
 
+static void RestoreWindow(GooeyShellState *state, WindowNode *node)
+{
+    if (!node || node->is_desktop_app || node->is_fullscreen_app)
+        return;
+
+    if (!node->is_minimized)
+        return;
+
+    LogInfo("Restoring window: %s", node->title);
+
+    XMapRaised(state->display, node->frame);
+    XMapWindow(state->display, node->client);
+
+    node->is_minimized = False;
+
+    if (!node->is_titlebar_disabled)
+    {
+        DrawTitleBar(state, node);
+    }
+
+    SendWindowStateThroughDBus(state, node->frame, "restored");
+
+    OptimizedXFlush(state);
+}
 int GooeyShell_IsWindowMinimized(GooeyShellState *state, Window client)
 {
     if (!state)
@@ -2404,8 +2375,11 @@ void GooeyShell_Cleanup(GooeyShellState *state)
     if (!state)
         return;
 
-    LogInfo("Cleaning up GooeyShell");
-
+    dbus_thread_running = 0;
+    if (state->is_dbus_init)
+    {
+        glps_thread_join(dbus_thread, NULL);
+    }
     if (state->is_dragging || state->is_resizing)
     {
         XUngrabPointer(state->display, CurrentTime);
@@ -2463,6 +2437,5 @@ void GooeyShell_Cleanup(GooeyShellState *state)
     if (state->display)
         XCloseDisplay(state->display);
     free(state);
-
-    LogInfo("GooeyShell cleanup completed");
+    glps_thread_mutex_destroy(&dbus_mutex);
 }

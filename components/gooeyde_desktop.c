@@ -52,6 +52,10 @@ static DBusConnection *dbus_conn = NULL;
 static int dbus_initialized = 0;
 static int dbus_thread_running = 1;
 
+static gthread_mutex_t managed_windows_mutex;
+static gthread_mutex_t dock_apps_mutex;
+static gthread_mutex_t ui_update_mutex;
+
 typedef struct
 {
     unsigned long window_id;
@@ -65,10 +69,9 @@ static ManagedWindow *managed_windows = NULL;
 static int managed_windows_count = 0;
 static int managed_windows_capacity = 0;
 
-static GooeyButton **dock_app_buttons = NULL;
+static GooeyImage **dock_app_buttons = NULL;
 static char **dock_app_window_ids = NULL;
 static int dock_app_buttons_count = 0;
-static int dock_app_buttons_capacity = 0;
 
 static GooeyImage *dock_bg = NULL;
 static int dock_width = 0;
@@ -83,6 +86,7 @@ static int dock_y = 0;
 #define DOCK_APP_SIZE 48
 #define DOCK_APP_MARGIN 10
 #define DOCK_APP_MAX 8
+#define DOCK_APP_BUTTONS_CAPACITY 8
 
 void execute_system_command(const char *command);
 int get_system_brightness();
@@ -122,7 +126,7 @@ void update_dock_apps();
 void create_dock_app_button(const char *window_id, const char *title, const char *state);
 void update_dock_app_button(const char *window_id, const char *state);
 void remove_dock_app_button(const char *window_id);
-void dock_app_button_callback(int button_index);
+void dock_app_button_callback_wrapper();
 void cleanup_dock_app_buttons();
 ManagedWindow *find_managed_window(const char *window_id);
 void add_managed_window(const char *window_id, const char *title, const char *state);
@@ -130,16 +134,57 @@ void update_managed_window(const char *window_id, const char *state);
 void remove_managed_window(const char *window_id);
 const char *get_app_icon_for_title(const char *title);
 
-void dock_app_button_clicked(GooeyButton *button)
+void dock_app_button_callback_wrapper()
 {
+    printf("callback wrapper invoked\n");
+    int button_index = 1;
+    printf("Dock button clicked: index %d\n", button_index);
 
-    for (int i = 0; i < dock_app_buttons_count; i++)
+    glps_thread_mutex_lock(&dock_apps_mutex);
+
+    if (button_index < 0 || button_index >= dock_app_buttons_count)
     {
-        if (dock_app_buttons[i] == button)
+        printf("Invalid button index: %d\n", button_index);
+        glps_thread_mutex_unlock(&dock_apps_mutex);
+        return;
+    }
+
+    const char *window_id = dock_app_window_ids[button_index];
+    if (!window_id)
+    {
+        printf("No window ID for button index %d\n", button_index);
+        glps_thread_mutex_unlock(&dock_apps_mutex);
+        return;
+    }
+
+    char window_id_copy[64];
+    strncpy(window_id_copy, window_id, sizeof(window_id_copy) - 1);
+    window_id_copy[sizeof(window_id_copy) - 1] = '\0';
+
+    glps_thread_mutex_unlock(&dock_apps_mutex);
+
+    glps_thread_mutex_lock(&managed_windows_mutex);
+    ManagedWindow *window = find_managed_window(window_id_copy);
+
+    if (window)
+    {
+        if (window->is_minimized)
         {
-            dock_app_button_callback(i);
-            return;
+            printf("Restoring window: %s\n", window->title);
+            glps_thread_mutex_unlock(&managed_windows_mutex);
+            send_window_command(window_id_copy, "restore");
         }
+        else
+        {
+            printf("Minimizing window: %s\n", window->title);
+            glps_thread_mutex_unlock(&managed_windows_mutex);
+            send_window_command(window_id_copy, "minimize");
+        }
+    }
+    else
+    {
+        printf("Window not found: %s\n", window_id_copy);
+        glps_thread_mutex_unlock(&managed_windows_mutex);
     }
 }
 
@@ -217,7 +262,6 @@ void *dbus_monitor_thread(void *arg)
 
     while (dbus_thread_running && dbus_initialized)
     {
-
         if (!dbus_connection_read_write(dbus_conn, 50))
         {
             usleep(50000);
@@ -261,6 +305,7 @@ void process_dbus_message(DBusMessage *message)
         }
     }
 }
+
 void handle_window_list_updated(DBusMessage *message)
 {
     DBusMessageIter iter;
@@ -269,6 +314,8 @@ void handle_window_list_updated(DBusMessage *message)
         fprintf(stderr, "No arguments in WindowListUpdated signal\n");
         return;
     }
+
+    glps_thread_mutex_lock(&managed_windows_mutex);
 
     for (int i = 0; i < managed_windows_count; i++)
     {
@@ -290,7 +337,6 @@ void handle_window_list_updated(DBusMessage *message)
             if (window_id)
             {
                 printf("Adding window ID from shell: %s\n", window_id);
-
                 add_managed_window(window_id, window_id, "normal");
             }
 
@@ -299,8 +345,11 @@ void handle_window_list_updated(DBusMessage *message)
     }
 
     printf("Received window list update: %d windows\n", managed_windows_count);
+    glps_thread_mutex_unlock(&managed_windows_mutex);
+
     update_dock_apps();
 }
+
 void handle_window_state_changed(DBusMessage *message)
 {
     DBusMessageIter iter;
@@ -327,7 +376,11 @@ void handle_window_state_changed(DBusMessage *message)
     if (window_id && state)
     {
         printf("Window state changed: %s -> %s\n", window_id, state);
+
+        glps_thread_mutex_lock(&managed_windows_mutex);
         update_managed_window(window_id, state);
+        glps_thread_mutex_unlock(&managed_windows_mutex);
+
         update_dock_app_button(window_id, state);
     }
 }
@@ -488,7 +541,7 @@ void remove_managed_window(const char *window_id)
 const char *get_app_icon_for_title(const char *title)
 {
     if (!title)
-        return "assets/default_app.png";
+        return "assets/app_default.png";
 
     char lower_title[256];
     for (int i = 0; title[i] && i < 255; i++)
@@ -530,38 +583,43 @@ const char *get_app_icon_for_title(const char *title)
         return "assets/settings.png";
     }
 
-    return "assets/default_app.png";
+    return "assets/app_default.png";
 }
-
 void cleanup_dock_app_buttons()
 {
+    glps_thread_mutex_lock(&dock_apps_mutex);
+
     if (!dock_app_buttons)
+    {
+        glps_thread_mutex_unlock(&dock_apps_mutex);
         return;
+    }
 
     for (int i = 0; i < dock_app_buttons_count; i++)
     {
         if (dock_app_buttons[i])
         {
         }
-    }
-    free(dock_app_buttons);
-    dock_app_buttons = NULL;
-
-    if (dock_app_window_ids)
-    {
-        for (int i = 0; i < dock_app_buttons_count; i++)
+        if (dock_app_window_ids[i])
         {
-            if (dock_app_window_ids[i])
-            {
-                free(dock_app_window_ids[i]);
-            }
+            free(dock_app_window_ids[i]);
+            dock_app_window_ids[i] = NULL;
         }
-        free(dock_app_window_ids);
-        dock_app_window_ids = NULL;
+        dock_app_buttons[i] = NULL;
     }
 
+    free(dock_app_buttons);
+    free(dock_app_window_ids);
+
+    dock_app_buttons = NULL;
+    dock_app_window_ids = NULL;
     dock_app_buttons_count = 0;
-    dock_app_buttons_capacity = 0;
+
+    glps_thread_mutex_unlock(&dock_apps_mutex);
+}
+void test_callback()
+{
+    printf("Test callback invoked\n");
 }
 
 void create_dock_app_button(const char *window_id, const char *title, const char *state)
@@ -569,30 +627,36 @@ void create_dock_app_button(const char *window_id, const char *title, const char
     if (!window_id || !title)
         return;
 
-    if (dock_app_buttons_count >= dock_app_buttons_capacity)
-    {
-        int new_capacity = dock_app_buttons_capacity == 0 ? 4 : dock_app_buttons_capacity * 2;
-        GooeyButton **new_buttons = realloc(dock_app_buttons, new_capacity * sizeof(GooeyButton *));
-        char **new_window_ids = realloc(dock_app_window_ids, new_capacity * sizeof(char *));
+    glps_thread_mutex_lock(&dock_apps_mutex);
 
-        if (!new_buttons || !new_window_ids)
+    if (!dock_app_buttons)
+    {
+        dock_app_buttons = malloc(DOCK_APP_BUTTONS_CAPACITY * sizeof(GooeyImage *));
+        dock_app_window_ids = malloc(DOCK_APP_BUTTONS_CAPACITY * sizeof(char *));
+
+        if (!dock_app_buttons || !dock_app_window_ids)
         {
-            fprintf(stderr, "Failed to realloc dock arrays\n");
+            fprintf(stderr, "Failed to alloc dock arrays\n");
+            glps_thread_mutex_unlock(&dock_apps_mutex);
             return;
         }
-        dock_app_buttons = new_buttons;
-        dock_app_window_ids = new_window_ids;
-        dock_app_buttons_capacity = new_capacity;
+
+        for (int i = 0; i < DOCK_APP_BUTTONS_CAPACITY; i++)
+        {
+            dock_app_buttons[i] = NULL;
+            dock_app_window_ids[i] = NULL;
+        }
+
+        dock_app_buttons_count = 0;
     }
 
-    int total_width = (DOCK_APP_SIZE + DOCK_APP_MARGIN) * dock_app_buttons_count;
-    int start_x = dock_x + (dock_width - total_width) / 2;
-    int button_x = start_x + (dock_app_buttons_count * (DOCK_APP_SIZE + DOCK_APP_MARGIN));
+    int button_x = dock_x + (dock_app_buttons_count * (DOCK_APP_SIZE + DOCK_APP_MARGIN)) + DOCK_APP_MARGIN;
     int button_y = dock_y + (dock_height - DOCK_APP_SIZE) / 2;
 
     if (dock_app_buttons_count >= DOCK_APP_MAX)
     {
         printf("Too many apps in dock, skipping: %s\n", title);
+        glps_thread_mutex_unlock(&dock_apps_mutex);
         return;
     }
 
@@ -600,27 +664,35 @@ void create_dock_app_button(const char *window_id, const char *title, const char
     if (!dock_app_window_ids[dock_app_buttons_count])
     {
         fprintf(stderr, "Failed to duplicate window_id\n");
+        glps_thread_mutex_unlock(&dock_apps_mutex);
         return;
     }
 
-    char button_label[32];
-    snprintf(button_label, sizeof(button_label), "%.20s", title);
+    const char *icon_path = "assets/app_default.png";
 
-    dock_app_buttons[dock_app_buttons_count] = GooeyButton_Create(
-        button_label,
+    dock_app_buttons[dock_app_buttons_count] = (GooeyImage *)GooeyImage_Create(
+        icon_path,
         button_x,
         button_y,
         DOCK_APP_SIZE,
         DOCK_APP_SIZE,
-        dock_app_button_clicked);
+        NULL);
 
+    GooeyCanvas *test_c = GooeyCanvas_Create(button_x,
+                                             button_y,
+                                             DOCK_APP_SIZE,
+                                             DOCK_APP_SIZE, dock_app_button_callback_wrapper);
+    GooeyCanvas_DrawRectangle(test_c, button_x,
+                              button_y,
+                              DOCK_APP_SIZE,
+                              DOCK_APP_SIZE, 0xFF0000, true, 0.0f, true, 0.0f);
+    GooeyWindow_RegisterWidget(win, test_c);
     if (dock_app_buttons[dock_app_buttons_count])
     {
-
         GooeyWindow_RegisterWidget(win, dock_app_buttons[dock_app_buttons_count]);
         dock_app_buttons_count++;
 
-        printf("Created dock app button: %s (%s) at %d,%d\n", title, state, button_x, button_y);
+        printf("Created dock app button: %s (%s) at %d,%d with default icon\n", title, state, button_x, button_y);
     }
     else
     {
@@ -628,37 +700,41 @@ void create_dock_app_button(const char *window_id, const char *title, const char
         dock_app_window_ids[dock_app_buttons_count] = NULL;
         fprintf(stderr, "Failed to create dock app button for: %s\n", title);
     }
-}
 
+    glps_thread_mutex_unlock(&dock_apps_mutex);
+}
 void update_dock_app_button(const char *window_id, const char *state)
 {
     if (!window_id || !state)
         return;
 
+    glps_thread_mutex_lock(&dock_apps_mutex);
+
     for (int i = 0; i < dock_app_buttons_count; i++)
     {
         if (dock_app_window_ids[i] && strcmp(dock_app_window_ids[i], window_id) == 0)
         {
-
             if (strcmp(state, "minimized") == 0)
             {
-
                 printf("Dock app %s is minimized\n", window_id);
             }
             else if (strcmp(state, "normal") == 0 || strcmp(state, "restored") == 0)
             {
-
                 printf("Dock app %s is restored\n", window_id);
             }
+            glps_thread_mutex_unlock(&dock_apps_mutex);
             return;
         }
     }
-}
 
+    glps_thread_mutex_unlock(&dock_apps_mutex);
+}
 void remove_dock_app_button(const char *window_id)
 {
     if (!window_id)
         return;
+
+    glps_thread_mutex_lock(&dock_apps_mutex);
 
     for (int i = 0; i < dock_app_buttons_count; i++)
     {
@@ -667,70 +743,66 @@ void remove_dock_app_button(const char *window_id)
             printf("Removing dock app button %s\n", window_id);
 
             free(dock_app_window_ids[i]);
+            dock_app_window_ids[i] = NULL;
 
             for (int j = i; j < dock_app_buttons_count - 1; j++)
             {
                 dock_app_buttons[j] = dock_app_buttons[j + 1];
                 dock_app_window_ids[j] = dock_app_window_ids[j + 1];
             }
+
+            dock_app_buttons[dock_app_buttons_count - 1] = NULL;
+            dock_app_window_ids[dock_app_buttons_count - 1] = NULL;
+
             dock_app_buttons_count--;
 
+            glps_thread_mutex_unlock(&dock_apps_mutex);
             update_dock_apps();
             return;
         }
     }
+
+    glps_thread_mutex_unlock(&dock_apps_mutex);
 }
-
-void dock_app_button_callback(int button_index)
-{
-    if (button_index < 0 || button_index >= dock_app_buttons_count)
-    {
-        printf("Invalid button index: %d\n", button_index);
-        return;
-    }
-
-    const char *window_id = dock_app_window_ids[button_index];
-    if (!window_id)
-    {
-        printf("No window ID for button index %d\n", button_index);
-        return;
-    }
-
-    ManagedWindow *window = find_managed_window(window_id);
-    if (window)
-    {
-        if (window->is_minimized)
-        {
-
-            printf("Restoring window: %s\n", window->title);
-            send_window_command(window_id, "restore");
-        }
-        else
-        {
-
-            printf("Minimizing window: %s\n", window->title);
-            send_window_command(window_id, "minimize");
-        }
-    }
-    else
-    {
-        printf("Window not found: %s\n", window_id);
-    }
-}
-
 void update_dock_apps()
 {
+    glps_thread_mutex_lock(&managed_windows_mutex);
     printf("Updating dock with %d windows\n", managed_windows_count);
+
+    int window_count = managed_windows_count;
+    ManagedWindow *windows_copy = malloc(window_count * sizeof(ManagedWindow));
+    if (!windows_copy)
+    {
+        glps_thread_mutex_unlock(&managed_windows_mutex);
+        return;
+    }
+
+    for (int i = 0; i < window_count; i++)
+    {
+        windows_copy[i].window_id = managed_windows[i].window_id;
+        windows_copy[i].title = strdup(managed_windows[i].title);
+        windows_copy[i].state = strdup(managed_windows[i].state);
+        windows_copy[i].is_minimized = managed_windows[i].is_minimized;
+        windows_copy[i].is_fullscreen = managed_windows[i].is_fullscreen;
+    }
+
+    glps_thread_mutex_unlock(&managed_windows_mutex);
 
     cleanup_dock_app_buttons();
 
-    for (int i = 0; i < managed_windows_count; i++)
+    for (int i = 0; i < window_count; i++)
     {
         char window_id_str[32];
-        snprintf(window_id_str, sizeof(window_id_str), "%lu", managed_windows[i].window_id);
-
-        create_dock_app_button(window_id_str, managed_windows[i].title, managed_windows[i].state);
+        snprintf(window_id_str, sizeof(window_id_str), "%lu", windows_copy[i].window_id);
+        create_dock_app_button(window_id_str, windows_copy[i].title, windows_copy[i].state);
     }
+
+    for (int i = 0; i < window_count; i++)
+    {
+        free(windows_copy[i].title);
+        free(windows_copy[i].state);
+    }
+    free(windows_copy);
 }
 
 void execute_system_command(const char *command)
@@ -871,7 +943,6 @@ void get_network_status()
 
 void init_system_settings()
 {
-
     current_brightness = 80;
     current_volume = 75;
     battery_level = 85;
@@ -897,6 +968,8 @@ void init_system_settings()
 
 void update_status_icons()
 {
+    glps_thread_mutex_lock(&ui_update_mutex);
+
     int wifi_state = get_system_wifi_state();
     if (wifi_status_icon)
     {
@@ -970,6 +1043,8 @@ void update_status_icons()
         snprintf(battery_text, sizeof(battery_text), "%d%%", battery_level);
         GooeyLabel_SetText(battery_percent_label, battery_text);
     }
+
+    glps_thread_mutex_unlock(&ui_update_mutex);
 }
 
 void run_app_menu()
@@ -1005,10 +1080,12 @@ void update_time_date()
     strftime(time_buffer, sizeof(time_buffer), "%I:%M:%S %p", time_info);
     strftime(date_buffer, sizeof(date_buffer), "%A, %B %d", time_info);
 
+    glps_thread_mutex_lock(&ui_update_mutex);
     if (time_label)
         GooeyLabel_SetText(time_label, time_buffer);
     if (date_label)
         GooeyLabel_SetText(date_label, date_buffer);
+    glps_thread_mutex_unlock(&ui_update_mutex);
 }
 
 void *time_update_thread(void *arg)
@@ -1168,6 +1245,8 @@ void set_control_panel_visibility(int visible)
     if (!control_panel_bg)
         return;
 
+    glps_thread_mutex_lock(&ui_update_mutex);
+
     GooeyWidget_MakeVisible(control_panel_bg, visible);
     GooeyWidget_MakeVisible(panel_title, visible);
     GooeyWidget_MakeVisible(wifi_label, visible);
@@ -1188,6 +1267,8 @@ void set_control_panel_visibility(int visible)
     GooeyWidget_MakeVisible(system_title, visible);
     GooeyWidget_MakeVisible(battery_label, visible);
     GooeyWidget_MakeVisible(network_label, visible);
+
+    glps_thread_mutex_unlock(&ui_update_mutex);
 }
 
 void wifi_switch_callback(bool value)
@@ -1198,10 +1279,14 @@ void wifi_switch_callback(bool value)
     printf("WiFi %s\n", value ? "Enabled" : "Disabled");
 
     get_network_status();
+
+    glps_thread_mutex_lock(&ui_update_mutex);
     if (network_label)
     {
         GooeyLabel_SetText(network_label, network_status);
     }
+    glps_thread_mutex_unlock(&ui_update_mutex);
+
     update_status_icons();
 }
 
@@ -1250,12 +1335,15 @@ void volume_slider_callback(long value)
     execute_system_command(cmd);
     printf("Volume set to: %ld%%\n", value);
 
+    glps_thread_mutex_lock(&ui_update_mutex);
     if (volume_value_label)
     {
         char volume_text[32];
         snprintf(volume_text, sizeof(volume_text), "%ld%%", value);
         GooeyLabel_SetText(volume_value_label, volume_text);
     }
+    glps_thread_mutex_unlock(&ui_update_mutex);
+
     update_status_icons();
 }
 
@@ -1270,12 +1358,14 @@ void brightness_slider_callback(long value)
     execute_system_command(cmd);
     printf("Brightness set to: %ld%%\n", value);
 
+    glps_thread_mutex_lock(&ui_update_mutex);
     if (brightness_value_label)
     {
         char brightness_text[32];
         snprintf(brightness_text, sizeof(brightness_text), "%ld%%", value);
         GooeyLabel_SetText(brightness_value_label, brightness_text);
     }
+    glps_thread_mutex_unlock(&ui_update_mutex);
 }
 
 void mute_audio_callback()
@@ -1290,6 +1380,8 @@ void refresh_system_info()
     printf("Refreshing system information...\n");
 
     battery_level = get_battery_level();
+
+    glps_thread_mutex_lock(&ui_update_mutex);
     if (battery_label)
     {
         char battery_text[32];
@@ -1330,6 +1422,7 @@ void refresh_system_info()
             GooeyLabel_SetText(brightness_value_label, brightness_text);
         }
     }
+    glps_thread_mutex_unlock(&ui_update_mutex);
 
     printf("System info refreshed\n");
 }
@@ -1360,6 +1453,10 @@ void create_status_icons()
 int main(int argc, char **argv)
 {
     printf("Starting Gooey Desktop...\n");
+
+    glps_thread_mutex_init(&managed_windows_mutex, NULL);
+    glps_thread_mutex_init(&dock_apps_mutex, NULL);
+    glps_thread_mutex_init(&ui_update_mutex, NULL);
 
     Gooey_Init();
     screen_info = get_screen_resolution();
@@ -1461,12 +1558,18 @@ int main(int argc, char **argv)
     cleanup_dbus();
     cleanup_dock_app_buttons();
 
+    glps_thread_mutex_lock(&managed_windows_mutex);
     for (int i = 0; i < managed_windows_count; i++)
     {
         free(managed_windows[i].title);
         free(managed_windows[i].state);
     }
     free(managed_windows);
+    glps_thread_mutex_unlock(&managed_windows_mutex);
+
+    glps_thread_mutex_destroy(&managed_windows_mutex);
+    glps_thread_mutex_destroy(&dock_apps_mutex);
+    glps_thread_mutex_destroy(&ui_update_mutex);
 
     GooeyWindow_Cleanup(1, win);
     printf("Desktop shutdown complete\n");
