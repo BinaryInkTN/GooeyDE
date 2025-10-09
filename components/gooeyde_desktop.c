@@ -8,7 +8,9 @@
 #include <ctype.h>
 #include <GLPS/glps_thread.h>
 #include <dbus/dbus.h>
-
+/*
+gcc components/gooeyde_desktop.c -o gooeyde_desktop   $(pkg-config --cflags --libs dbus-1)   -lGooeyGUI-1   -lGLPS   -I/usr/local/include/GLPS   -lX11 -lXrandr -lXcursor -lm -lpthread   -Wl,-rpath,/usr/local/lib
+*/
 ScreenInfo screen_info;
 GooeyWindow *win = NULL;
 GooeyLabel *time_label = NULL;
@@ -764,7 +766,6 @@ void create_dock_app_button(const char *window_id, const char *title, const char
         return;
     }
 
-    // Use the provided icon path, or fallback if not available
     const char *actual_icon_path = icon_path;
     if (!actual_icon_path || strlen(actual_icon_path) == 0 || access(actual_icon_path, F_OK) != 0)
     {
@@ -774,7 +775,7 @@ void create_dock_app_button(const char *window_id, const char *title, const char
     printf("Creating dock button for '%s' with icon: %s\n", title, actual_icon_path);
 
     dock_app_buttons[dock_app_buttons_count] = (GooeyImage *)GooeyImage_Create(
-        actual_icon_path,
+        "assets/app_default.png",
         button_x,
         button_y,
         DOCK_APP_SIZE,
@@ -784,7 +785,7 @@ void create_dock_app_button(const char *window_id, const char *title, const char
     if (dock_app_buttons[dock_app_buttons_count])
     {
         dock_button_indices[dock_app_buttons_count] = dock_app_buttons_count;
-
+        
         GooeyCanvas *clickable_area = GooeyCanvas_Create(
             button_x,
             button_y,
@@ -798,7 +799,7 @@ void create_dock_app_button(const char *window_id, const char *title, const char
                                   button_y,
                                   DOCK_APP_SIZE,
                                   DOCK_APP_SIZE,
-                                  0x000000, false, 0.0f, true, 0.0f);
+                                  0xFF0000, false, 0.0f, true, 0.0f);
 
         GooeyWindow_RegisterWidget(win, clickable_area);
         GooeyWindow_RegisterWidget(win, dock_app_buttons[dock_app_buttons_count]);
@@ -831,13 +832,15 @@ void update_dock_app_button(const char *window_id, const char *state)
             if (strcmp(state, "minimized") == 0)
             {
                 printf("Dock app %s is minimized\n", window_id);
-                // You could add visual indication here (e.g., dim the icon)
             }
             else if (strcmp(state, "normal") == 0 || strcmp(state, "restored") == 0)
             {
                 printf("Dock app %s is restored\n", window_id);
-                // Remove any visual indication of minimization
+            } else             if (strcmp(state, "closed") == 0) 
+            {
+                GooeyWindow_UnRegisterWidget(win, dock_app_buttons[i]);
             }
+
             glps_thread_mutex_unlock(&dock_apps_mutex);
             return;
         }
