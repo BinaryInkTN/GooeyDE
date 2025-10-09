@@ -292,7 +292,6 @@ static int ShouldExcludeFromTaskbar(GooeyShellState *state, WindowNode *node)
 
     return 0;
 }
-
 static void SendWindowListThroughDBus(GooeyShellState *state)
 {
     if (!state->dbus_connection || !state->is_dbus_init)
@@ -301,7 +300,7 @@ static void SendWindowListThroughDBus(GooeyShellState *state)
     }
 
     DBusMessage *message;
-    DBusMessageIter args, array_iter;
+    DBusMessageIter args, array_iter, struct_iter;
     char window_id[64];
     int i;
 
@@ -316,8 +315,7 @@ static void SendWindowListThroughDBus(GooeyShellState *state)
     dbus_message_iter_init_append(message, &args);
 
     if (!dbus_message_iter_open_container(&args, DBUS_TYPE_ARRAY,
-                                          DBUS_TYPE_STRING_AS_STRING,
-                                          &array_iter))
+                                          "(sss)", &array_iter))
     {
         dbus_message_unref(message);
         return;
@@ -329,8 +327,18 @@ static void SendWindowListThroughDBus(GooeyShellState *state)
         if (node && !ShouldExcludeFromTaskbar(state, node))
         {
             snprintf(window_id, sizeof(window_id), "%lu", opened_windows[i]);
-            const char *window_str = window_id;
-            dbus_message_iter_append_basic(&array_iter, DBUS_TYPE_STRING, &window_str);
+            const char *id_str = window_id;
+            const char *title_str = node->title ? node->title : "";
+            const char *icon_path_str ="";
+
+            if (dbus_message_iter_open_container(&array_iter, DBUS_TYPE_STRUCT, NULL, &struct_iter))
+            {
+                dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_STRING, &id_str);
+                dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_STRING, &title_str);
+                dbus_message_iter_append_basic(&struct_iter, DBUS_TYPE_STRING, &icon_path_str);
+
+                dbus_message_iter_close_container(&array_iter, &struct_iter);
+            }
         }
     }
 
