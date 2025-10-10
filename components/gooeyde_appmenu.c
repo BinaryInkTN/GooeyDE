@@ -440,7 +440,7 @@ static void *detect_apps_thread_func(void *arg)
 {
     detect_system_applications();
     update_ui();
-        
+
     return NULL;
 }
 
@@ -620,7 +620,7 @@ static void create_ui(void)
     GooeyContainer_InsertContainer(main_container);
     GooeyContainer_SetActiveContainer(main_container, 0);
 
-    background = GooeyCanvas_Create(0, 0, screen_info.width, screen_info.height, NULL);
+    background = GooeyCanvas_Create(0, 0, screen_info.width, screen_info.height, NULL, NULL);
     if (background)
     {
         GooeyCanvas_DrawRectangle(background, 0, 0, screen_info.width, screen_info.height,
@@ -651,13 +651,13 @@ static void create_ui(void)
     search_input = GooeyTextBox_Create(search_x, search_y,
                                        search_width, search_height,
                                        "Type to search applications...", false,
-                                       on_search_text_changed);
+                                       on_search_text_changed, NULL);
     if (search_input)
     {
         GooeyContainer_AddWidget(main_window, main_container, 0, search_input);
     }
 
-    close_button = GooeyImage_Create("assets/cross.png", screen_info.width - 50, 15, 24, 24, close_application);
+    close_button = GooeyImage_Create("assets/cross.png", screen_info.width - 50, 15, 24, 24, close_application, NULL);
     if (close_button)
     {
         GooeyContainer_AddWidget(main_window, main_container, 0, close_button);
@@ -670,7 +670,7 @@ static void create_ui(void)
         GooeyContainer_AddWidget(main_window, main_container, 0, page_info_label);
     }
 
-    prev_button = GooeyCanvas_Create(grid_margin_x, grid_margin_y - 50, 120, 35, prev_page);
+    prev_button = GooeyCanvas_Create(grid_margin_x, grid_margin_y - 50, 120, 35, prev_page, NULL);
     if (prev_button)
     {
         GooeyCanvas_DrawRectangle(prev_button, 0, 0, 120, 35, 0x444444, true, 1.0f, true, 1.0f);
@@ -686,7 +686,7 @@ static void create_ui(void)
         GooeyWidget_MakeVisible(prev_label, 0);
     }
 
-    next_button = GooeyCanvas_Create(screen_info.width - grid_margin_x - 120, grid_margin_y - 50, 120, 35, next_page);
+    next_button = GooeyCanvas_Create(screen_info.width - grid_margin_x - 120, grid_margin_y - 50, 120, 35, next_page,  NULL);
     if (next_button)
     {
         GooeyCanvas_DrawRectangle(next_button, 0, 0, 120, 35, 0x444444, true, 1.0f, true, 1.0f);
@@ -731,7 +731,7 @@ static void create_ui(void)
             const int x = grid_margin_x + col * (button_width + grid_spacing_x);
             const int y = grid_margin_y + row * (button_height + grid_spacing_y);
 
-            app_buttons[grid_index] = GooeyCanvas_Create(x, y, button_width, button_height, launch_callbacks[grid_index]);
+            app_buttons[grid_index] = GooeyCanvas_Create(x, y, button_width, button_height, launch_callbacks[grid_index],  NULL);
             if (app_buttons[grid_index])
             {
                 GooeyCanvas_DrawRectangle(app_buttons[grid_index], 0, 0, button_width, button_height, 0x444444, true, 1.0f, true, 1.0f);
@@ -740,7 +740,7 @@ static void create_ui(void)
                 GooeyWidget_MakeVisible(app_buttons[grid_index], 0);
             }
 
-            app_icons[grid_index] = GooeyImage_Create(initial_icon, x + 10, y + 10, 32, 32, NULL);
+            app_icons[grid_index] = GooeyImage_Create(initial_icon, x + 10, y + 10, 32, 32, NULL, NULL);
             if (app_icons[grid_index])
             {
                 GooeyContainer_AddWidget(main_window, main_container, 0, app_icons[grid_index]);

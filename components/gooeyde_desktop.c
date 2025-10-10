@@ -8,9 +8,7 @@
 #include <ctype.h>
 #include <GLPS/glps_thread.h>
 #include <dbus/dbus.h>
-/*
-gcc components/gooeyde_desktop.c -o gooeyde_desktop   $(pkg-config --cflags --libs dbus-1)   -lGooeyGUI-1   -lGLPS   -I/usr/local/include/GLPS   -lX11 -lXrandr -lXcursor -lm -lpthread   -Wl,-rpath,/usr/local/lib
-*/
+
 ScreenInfo screen_info;
 GooeyWindow *win = NULL;
 GooeyLabel *time_label = NULL;
@@ -39,12 +37,25 @@ GooeyLabel *battery_label = NULL;
 GooeyLabel *network_label = NULL;
 GooeyButton *settings_button = NULL;
 GooeyLabel *settings_label = NULL;
+GooeyLabel *unsupported_devices_label = NULL;
 
 GooeyImage *wifi_status_icon = NULL;
 GooeyImage *bluetooth_status_icon = NULL;
 GooeyImage *volume_status_icon = NULL;
 GooeyImage *battery_status_icon = NULL;
 GooeyLabel *battery_percent_label = NULL;
+
+GooeyImage *wallpaper_dialog_bg = NULL;
+GooeyLabel *wallpaper_dialog_title = NULL;
+GooeyButton *wallpaper_browse_button = NULL;
+GooeyButton *wallpaper_cancel_button = NULL;
+GooeyLabel *wallpaper_current_label = NULL;
+GooeyLabel *wallpaper_selected_label = NULL;
+GooeyImage *current_wallpaper_preview = NULL;
+
+char current_wallpaper_path[256] = "assets/bg.png";
+char selected_wallpaper_path[256] = "";
+int wallpaper_dialog_visible = 0;
 
 int current_volume = 75;
 int current_brightness = 80;
@@ -93,7 +104,8 @@ static int dock_y = 0;
 #define DOCK_APP_BUTTONS_CAPACITY 8
 
 static int dock_button_indices[DOCK_APP_BUTTONS_CAPACITY];
-
+static GooeyImage *dock_app_minimize_indicators[DOCK_APP_BUTTONS_CAPACITY];
+static GooeyCanvas *dock_app_clickable_areas[DOCK_APP_BUTTONS_CAPACITY];
 void execute_system_command(const char *command);
 int get_system_brightness();
 int get_max_brightness();
@@ -140,6 +152,200 @@ void update_managed_window(const char *window_id, const char *state);
 void remove_managed_window(const char *window_id);
 const char *get_fallback_icon_for_title(const char *title);
 
+void open_wallpaper_settings();
+void wallpaper_dialog_callback(const char *filename);
+void set_wallpaper(const char *filename);
+void create_wallpaper_dialog();
+void destroy_wallpaper_dialog();
+void set_wallpaper_dialog_visibility(int visible);
+void set_wallpaper(const char *filename)
+{
+    if (!filename || strlen(filename) == 0)
+    {
+        printf("No wallpaper file selected\n");
+        return;
+    }
+
+    if (access(filename, F_OK) != 0)
+    {
+        printf("Wallpaper file does not exist: %s\n", filename);
+        return;
+    }
+
+    strncpy(current_wallpaper_path, filename, sizeof(current_wallpaper_path) - 1);
+    current_wallpaper_path[sizeof(current_wallpaper_path) - 1] = '\0';
+
+    printf("Setting wallpaper to: %s\n", filename);
+
+    if (wallpaper_dialog_visible && wallpaper_current_label)
+    {
+        char display_text[128];
+        const char *basename = strrchr(filename, '/');
+        if (basename)
+        {
+            snprintf(display_text, sizeof(display_text), "Current: %s", basename + 1);
+        }
+        else
+        {
+            snprintf(display_text, sizeof(display_text), "Current: %s", filename);
+        }
+        GooeyLabel_SetText(wallpaper_current_label, display_text);
+    }
+}
+
+void wallpaper_dialog_callback(const char *filename)
+{
+    if (filename && strlen(filename) > 0)
+    {
+
+        printf("Wallpaper selected: %s\n", filename);
+        strncpy(selected_wallpaper_path, filename, sizeof(selected_wallpaper_path) - 1);
+
+        selected_wallpaper_path[sizeof(selected_wallpaper_path) - 1] = '\0';
+       
+        if (wallpaper_selected_label)
+        {
+            char display_text[128];
+            const char *basename = strrchr(filename, '/');
+            if (basename)
+            {
+                snprintf(display_text, sizeof(display_text), "Selected: %s", basename + 1);
+            }
+            else
+            {
+                snprintf(display_text, sizeof(display_text), "Selected: %s", filename);
+            }
+
+            GooeyLabel_SetText(wallpaper_selected_label, display_text);
+        }
+
+        set_wallpaper(filename);
+    }
+    else
+    {
+        printf("No wallpaper file selected\n");
+    }
+}
+
+void wallpaper_browse_callback()
+{
+    printf("Opening file dialog for wallpaper selection\n");
+
+    const char *filters[] = {
+        "*.png",
+        "*.jpg",
+        "*.jpeg",
+        "*.bmp",
+        "*.gif"};
+    int filter_count = 5;
+
+    GooeyFDialog_Open(".", NULL, 0, wallpaper_dialog_callback);
+}
+
+void wallpaper_cancel_callback()
+{
+    printf("Closing wallpaper settings\n");
+    set_wallpaper_dialog_visibility(0);
+}
+
+void create_wallpaper_dialog()
+{
+    printf("Creating wallpaper settings dialog\n");
+
+    int dialog_width = 400;
+    int dialog_height = 300;
+    int dialog_x = (screen_info.width - dialog_width) / 2;
+    int dialog_y = (screen_info.height - dialog_height) / 2;
+
+    wallpaper_dialog_bg = GooeyImage_Create("assets/control_panel_bg.png",
+                                            dialog_x,
+                                            dialog_y,
+                                            dialog_width,
+                                            dialog_height,
+                                            NULL,
+                                            NULL);
+
+    wallpaper_dialog_title = GooeyLabel_Create("Wallpaper Settings", 0.4f, dialog_x + 20, dialog_y + 30);
+    GooeyLabel_SetColor(wallpaper_dialog_title, 0xFFFFFF);
+    current_wallpaper_preview = GooeyImage_Create(current_wallpaper_path, dialog_x + 20, dialog_y + 50, 192, 108, NULL, NULL);
+    char current_text[128];
+    const char *basename = strrchr(current_wallpaper_path, '/');
+    if (basename)
+    {
+        snprintf(current_text, sizeof(current_text), "Current: %s", basename + 1);
+    }
+    else
+    {
+        snprintf(current_text, sizeof(current_text), "Current: %s", current_wallpaper_path);
+    }
+    wallpaper_current_label = GooeyLabel_Create(current_text, 0.3f, dialog_x + 20, dialog_y + 190);
+    GooeyLabel_SetColor(wallpaper_current_label, 0xCCCCCC);
+
+    wallpaper_selected_label = GooeyLabel_Create("Selected: None", 0.3f, dialog_x + 20, dialog_y + 220);
+    GooeyLabel_SetColor(wallpaper_selected_label, 0xCCCCCC);
+
+    wallpaper_browse_button = GooeyButton_Create("Browse Wallpaper",
+                                                 dialog_x + 20,
+                                                 dialog_y + 240,
+                                                 200,
+                                                 40,
+                                                 wallpaper_browse_callback,
+                                                 NULL);
+
+    wallpaper_cancel_button = GooeyButton_Create("Close",
+                                                 dialog_x + dialog_width - 120,
+                                                 dialog_y + dialog_height - 50,
+                                                 100,
+                                                 35,
+                                                 wallpaper_cancel_callback,
+                                                 NULL);
+
+    GooeyWindow_RegisterWidget(win, wallpaper_dialog_bg);
+    GooeyWindow_RegisterWidget(win, wallpaper_dialog_title);
+    GooeyWindow_RegisterWidget(win, wallpaper_current_label);
+    GooeyWindow_RegisterWidget(win, wallpaper_selected_label);
+    GooeyWindow_RegisterWidget(win, wallpaper_browse_button);
+    GooeyWindow_RegisterWidget(win, wallpaper_cancel_button);
+    GooeyWindow_RegisterWidget(win, current_wallpaper_preview);
+    wallpaper_dialog_visible = 1;
+}
+
+void destroy_wallpaper_dialog()
+{
+    printf("Destroying wallpaper settings dialog\n");
+    set_wallpaper_dialog_visibility(0);
+}
+
+void set_wallpaper_dialog_visibility(int visible)
+{
+    wallpaper_dialog_visible = visible;
+
+    if (wallpaper_dialog_bg)
+    {
+        GooeyWidget_MakeVisible(wallpaper_dialog_bg, visible);
+        GooeyWidget_MakeVisible(wallpaper_dialog_title, visible);
+        GooeyWidget_MakeVisible(wallpaper_current_label, visible);
+        GooeyWidget_MakeVisible(wallpaper_selected_label, visible);
+        GooeyWidget_MakeVisible(wallpaper_browse_button, visible);
+        GooeyWidget_MakeVisible(wallpaper_cancel_button, visible);
+        GooeyWidget_MakeVisible(current_wallpaper_preview, visible);
+
+    }
+}
+
+void open_wallpaper_settings()
+{
+    printf("Opening wallpaper settings\n");
+
+    if (!wallpaper_dialog_bg)
+    {
+        create_wallpaper_dialog();
+    }
+    else
+    {
+        set_wallpaper_dialog_visibility(1);
+    }
+}
 void dock_app_button_callback_wrapper(int x, int y, void *user_data)
 {
     if (!user_data)
@@ -316,6 +522,7 @@ void process_dbus_message(DBusMessage *message)
         }
     }
 }
+
 void handle_window_list_updated(DBusMessage *message)
 {
     DBusMessageIter iter;
@@ -327,7 +534,6 @@ void handle_window_list_updated(DBusMessage *message)
 
     glps_thread_mutex_lock(&managed_windows_mutex);
 
-    // Clear existing windows
     for (int i = 0; i < managed_windows_count; i++)
     {
         free(managed_windows[i].title);
@@ -341,7 +547,6 @@ void handle_window_list_updated(DBusMessage *message)
     {
         dbus_message_iter_recurse(&iter, &array_iter);
 
-        // Each item is a struct (sss)
         while (dbus_message_iter_get_arg_type(&array_iter) == DBUS_TYPE_STRUCT)
         {
             DBusMessageIter struct_iter;
@@ -370,7 +575,7 @@ void handle_window_list_updated(DBusMessage *message)
 
             if (window_id && window_title && icon_path)
             {
-                printf("Adding window: ID=%s, Title='%s', Icon='%s'\n", 
+                printf("Adding window: ID=%s, Title='%s', Icon='%s'\n",
                        window_id, window_title, icon_path);
                 add_managed_window(window_id, window_title, icon_path, "normal");
             }
@@ -388,7 +593,6 @@ void handle_window_list_updated(DBusMessage *message)
 
     update_dock_apps();
 }
-
 
 void handle_window_state_changed(DBusMessage *message)
 {
@@ -418,10 +622,22 @@ void handle_window_state_changed(DBusMessage *message)
         printf("Window state changed: %s -> %s\n", window_id, state);
 
         glps_thread_mutex_lock(&managed_windows_mutex);
-        update_managed_window(window_id, state);
-        glps_thread_mutex_unlock(&managed_windows_mutex);
 
-        update_dock_app_button(window_id, state);
+        if (strcmp(state, "closed") == 0)
+        {
+
+            remove_managed_window(window_id);
+            glps_thread_mutex_unlock(&managed_windows_mutex);
+
+            remove_dock_app_button(window_id);
+        }
+        else
+        {
+            update_managed_window(window_id, state);
+            glps_thread_mutex_unlock(&managed_windows_mutex);
+
+            update_dock_app_button(window_id, state);
+        }
     }
 }
 
@@ -538,19 +754,17 @@ void add_managed_window(const char *window_id, const char *title, const char *ic
     ManagedWindow *window = &managed_windows[managed_windows_count++];
     window->window_id = strtoul(window_id, NULL, 10);
     window->title = title ? strdup(title) : strdup("Unknown");
-    
-    // Use the provided icon path, or fallback if not available
+
     if (icon_path && strlen(icon_path) > 0 && access(icon_path, F_OK) == 0)
     {
         window->icon_path = strdup(icon_path);
     }
     else
     {
-        // Fallback to title-based icon
         const char *fallback_icon = get_fallback_icon_for_title(title);
         window->icon_path = strdup(fallback_icon);
     }
-    
+
     window->state = state ? strdup(state) : strdup("normal");
     window->is_minimized = (state && strcmp(state, "minimized") == 0);
     window->is_fullscreen = (state && strcmp(state, "fullscreen") == 0);
@@ -578,6 +792,8 @@ void remove_managed_window(const char *window_id)
     {
         if (managed_windows[i].window_id == id)
         {
+            printf("Removing managed window: %s (%s)\n", managed_windows[i].title, window_id);
+
             free(managed_windows[i].title);
             free(managed_windows[i].icon_path);
             free(managed_windows[i].state);
@@ -682,7 +898,6 @@ const char *get_fallback_icon_for_title(const char *title)
     printf("No specific icon found, using default\n");
     return "assets/app_default.png";
 }
-
 void cleanup_dock_app_buttons()
 {
     glps_thread_mutex_lock(&dock_apps_mutex);
@@ -695,13 +910,17 @@ void cleanup_dock_app_buttons()
 
     for (int i = 0; i < dock_app_buttons_count; i++)
     {
+        if (dock_app_buttons[i])
+        {
+
+            GooeyWindow_UnRegisterWidget(win, dock_app_buttons[i]);
+        }
+
         if (dock_app_window_ids[i])
         {
             free(dock_app_window_ids[i]);
             dock_app_window_ids[i] = NULL;
         }
-        dock_app_buttons[i] = NULL;
-        dock_button_indices[i] = -1;
     }
 
     free(dock_app_buttons);
@@ -712,11 +931,6 @@ void cleanup_dock_app_buttons()
     dock_app_buttons_count = 0;
 
     glps_thread_mutex_unlock(&dock_apps_mutex);
-}
-
-void test_callback()
-{
-    printf("Test callback invoked\n");
 }
 
 void create_dock_app_button(const char *window_id, const char *title, const char *icon_path, const char *state)
@@ -748,6 +962,16 @@ void create_dock_app_button(const char *window_id, const char *title, const char
         dock_app_buttons_count = 0;
     }
 
+    for (int i = 0; i < dock_app_buttons_count; i++)
+    {
+        if (dock_app_window_ids[i] && strcmp(dock_app_window_ids[i], window_id) == 0)
+        {
+            printf("Window %s already exists in dock, skipping\n", window_id);
+            glps_thread_mutex_unlock(&dock_apps_mutex);
+            return;
+        }
+    }
+
     int button_x = dock_x + (dock_app_buttons_count * (DOCK_APP_SIZE + DOCK_APP_MARGIN)) + DOCK_APP_MARGIN;
     int button_y = dock_y + (dock_height - DOCK_APP_SIZE) / 2;
 
@@ -771,11 +995,11 @@ void create_dock_app_button(const char *window_id, const char *title, const char
     {
         actual_icon_path = get_fallback_icon_for_title(title);
     }
-
+    actual_icon_path = "assets/app_default.png";
     printf("Creating dock button for '%s' with icon: %s\n", title, actual_icon_path);
 
     dock_app_buttons[dock_app_buttons_count] = (GooeyImage *)GooeyImage_Create(
-        "assets/app_default.png",
+        actual_icon_path,
         button_x,
         button_y,
         DOCK_APP_SIZE,
@@ -785,8 +1009,8 @@ void create_dock_app_button(const char *window_id, const char *title, const char
     if (dock_app_buttons[dock_app_buttons_count])
     {
         dock_button_indices[dock_app_buttons_count] = dock_app_buttons_count;
-        
-        GooeyCanvas *clickable_area = GooeyCanvas_Create(
+
+        dock_app_clickable_areas[dock_app_buttons_count] = GooeyCanvas_Create(
             button_x,
             button_y,
             DOCK_APP_SIZE,
@@ -794,15 +1018,23 @@ void create_dock_app_button(const char *window_id, const char *title, const char
             dock_app_button_callback_wrapper,
             &dock_button_indices[dock_app_buttons_count]);
 
-        GooeyCanvas_DrawRectangle(clickable_area,
+        GooeyCanvas_DrawRectangle(dock_app_clickable_areas[dock_app_buttons_count],
                                   button_x,
                                   button_y,
                                   DOCK_APP_SIZE,
                                   DOCK_APP_SIZE,
                                   0xFF0000, false, 0.0f, true, 0.0f);
-
-        GooeyWindow_RegisterWidget(win, clickable_area);
+        dock_app_minimize_indicators[dock_app_buttons_count] = GooeyImage_Create(
+            "assets/minimized_icon.png",
+            button_x + DOCK_APP_SIZE / 2 - 7,
+            button_y - 6,
+            16,
+            16,
+            NULL, NULL);
+        GooeyWidget_MakeVisible(dock_app_minimize_indicators[dock_app_buttons_count], false);
+        GooeyWindow_RegisterWidget(win, dock_app_clickable_areas[dock_app_buttons_count]);
         GooeyWindow_RegisterWidget(win, dock_app_buttons[dock_app_buttons_count]);
+        GooeyWindow_RegisterWidget(win, dock_app_minimize_indicators[dock_app_buttons_count]);
 
         dock_app_buttons_count++;
         printf("Created dock app button: %s (%s) at %d,%d with index %d and icon %s\n",
@@ -832,13 +1064,12 @@ void update_dock_app_button(const char *window_id, const char *state)
             if (strcmp(state, "minimized") == 0)
             {
                 printf("Dock app %s is minimized\n", window_id);
+                GooeyWidget_MakeVisible(dock_app_minimize_indicators[i], true);
             }
             else if (strcmp(state, "normal") == 0 || strcmp(state, "restored") == 0)
             {
-                printf("Dock app %s is restored\n", window_id);
-            } else             if (strcmp(state, "closed") == 0) 
-            {
-                GooeyWindow_UnRegisterWidget(win, dock_app_buttons[i]);
+                printf("Dock app %s is normal/restored\n", window_id);
+                GooeyWidget_MakeVisible(dock_app_minimize_indicators[i], false);
             }
 
             glps_thread_mutex_unlock(&dock_apps_mutex);
@@ -848,7 +1079,6 @@ void update_dock_app_button(const char *window_id, const char *state)
 
     glps_thread_mutex_unlock(&dock_apps_mutex);
 }
-
 void remove_dock_app_button(const char *window_id)
 {
     if (!window_id)
@@ -856,37 +1086,59 @@ void remove_dock_app_button(const char *window_id)
 
     glps_thread_mutex_lock(&dock_apps_mutex);
 
+    int found_index = -1;
     for (int i = 0; i < dock_app_buttons_count; i++)
     {
         if (dock_app_window_ids[i] && strcmp(dock_app_window_ids[i], window_id) == 0)
         {
-            printf("Removing dock app button %s\n", window_id);
-
-            free(dock_app_window_ids[i]);
-            dock_app_window_ids[i] = NULL;
-
-            for (int j = i; j < dock_app_buttons_count - 1; j++)
-            {
-                dock_app_buttons[j] = dock_app_buttons[j + 1];
-                dock_app_window_ids[j] = dock_app_window_ids[j + 1];
-                dock_button_indices[j] = dock_button_indices[j + 1];
-            }
-
-            dock_app_buttons[dock_app_buttons_count - 1] = NULL;
-            dock_app_window_ids[dock_app_buttons_count - 1] = NULL;
-            dock_button_indices[dock_app_buttons_count - 1] = -1;
-
-            dock_app_buttons_count--;
-
-            glps_thread_mutex_unlock(&dock_apps_mutex);
-            update_dock_apps();
-            return;
+            found_index = i;
+            break;
         }
     }
 
-    glps_thread_mutex_unlock(&dock_apps_mutex);
-}
+    if (found_index == -1)
+    {
+        printf("Window %s not found in dock, nothing to remove\n", window_id);
+        glps_thread_mutex_unlock(&dock_apps_mutex);
+        return;
+    }
 
+    printf("Removing dock app button %s at index %d\n", window_id, found_index);
+
+    if (dock_app_buttons[found_index])
+    {
+        GooeyWindow_UnRegisterWidget(win, dock_app_buttons[found_index]);
+    }
+
+    if (dock_app_window_ids[found_index])
+    {
+        free(dock_app_window_ids[found_index]);
+        dock_app_window_ids[found_index] = NULL;
+    }
+
+    for (int j = found_index; j < dock_app_buttons_count - 1; j++)
+    {
+        dock_app_buttons[j] = dock_app_buttons[j + 1];
+        dock_app_window_ids[j] = dock_app_window_ids[j + 1];
+        dock_button_indices[j] = dock_button_indices[j + 1];
+
+        if (dock_app_buttons[j])
+        {
+            int new_x = dock_x + (j * (DOCK_APP_SIZE + DOCK_APP_MARGIN)) + DOCK_APP_MARGIN;
+            int new_y = dock_y + (dock_height - DOCK_APP_SIZE) / 2;
+        }
+    }
+
+    dock_app_buttons[dock_app_buttons_count - 1] = NULL;
+    dock_app_window_ids[dock_app_buttons_count - 1] = NULL;
+    dock_button_indices[dock_app_buttons_count - 1] = -1;
+
+    dock_app_buttons_count--;
+
+    glps_thread_mutex_unlock(&dock_apps_mutex);
+
+    printf("Successfully removed dock app button %s, remaining: %d\n", window_id, dock_app_buttons_count);
+}
 void update_dock_apps()
 {
     glps_thread_mutex_lock(&managed_windows_mutex);
@@ -912,24 +1164,78 @@ void update_dock_apps()
 
     glps_thread_mutex_unlock(&managed_windows_mutex);
 
-    cleanup_dock_app_buttons();
+    glps_thread_mutex_lock(&dock_apps_mutex);
+
+    char **expected_windows = malloc(window_count * sizeof(char *));
+    for (int i = 0; i < window_count; i++)
+    {
+        char window_id_str[32];
+        snprintf(window_id_str, sizeof(window_id_str), "%lu", windows_copy[i].window_id);
+        expected_windows[i] = strdup(window_id_str);
+    }
+
+    for (int i = dock_app_buttons_count - 1; i >= 0; i--)
+    {
+        if (!dock_app_window_ids[i])
+            continue;
+
+        int found = 0;
+        for (int j = 0; j < window_count; j++)
+        {
+            if (expected_windows[j] && strcmp(dock_app_window_ids[i], expected_windows[j]) == 0)
+            {
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found)
+        {
+            char *window_id_to_remove = strdup(dock_app_window_ids[i]);
+            glps_thread_mutex_unlock(&dock_apps_mutex);
+            remove_dock_app_button(window_id_to_remove);
+            free(window_id_to_remove);
+            glps_thread_mutex_lock(&dock_apps_mutex);
+
+            i = dock_app_buttons_count;
+        }
+    }
+
+    glps_thread_mutex_unlock(&dock_apps_mutex);
 
     for (int i = 0; i < window_count; i++)
     {
         char window_id_str[32];
         snprintf(window_id_str, sizeof(window_id_str), "%lu", windows_copy[i].window_id);
-        create_dock_app_button(window_id_str, windows_copy[i].title, windows_copy[i].icon_path, windows_copy[i].state);
+
+        int already_exists = 0;
+        glps_thread_mutex_lock(&dock_apps_mutex);
+        for (int j = 0; j < dock_app_buttons_count; j++)
+        {
+            if (dock_app_window_ids[j] && strcmp(dock_app_window_ids[j], window_id_str) == 0)
+            {
+                already_exists = 1;
+                break;
+            }
+        }
+        glps_thread_mutex_unlock(&dock_apps_mutex);
+
+        if (!already_exists)
+        {
+            create_dock_app_button(window_id_str, windows_copy[i].title, windows_copy[i].icon_path, windows_copy[i].state);
+        }
     }
 
     for (int i = 0; i < window_count; i++)
     {
+        free(expected_windows[i]);
         free(windows_copy[i].title);
         free(windows_copy[i].icon_path);
         free(windows_copy[i].state);
     }
+    free(expected_windows);
     free(windows_copy);
 }
-
 void execute_system_command(const char *command)
 {
     if (fork() == 0)
@@ -1006,6 +1312,22 @@ int get_system_wifi_state()
 
 int get_system_bluetooth_state()
 {
+    FILE *fp_check = popen("bluetoothctl list 2>/dev/null | grep -q . && echo present", "r");
+    int is_present = 0;
+    if (fp_check)
+    {
+        char present[16];
+        if (fgets(present, sizeof(present), fp_check))
+        {
+            is_present = strstr(present, "present") != NULL;
+        }
+        pclose(fp_check);
+    }
+    if (!is_present)
+    {
+        return 0;
+    }
+
     FILE *fp = popen("bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' && echo enabled", "r");
     if (fp)
     {
@@ -1022,7 +1344,28 @@ int get_system_bluetooth_state()
 
 int get_battery_level()
 {
-    FILE *fp = popen("cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -1", "r");
+    FILE *check_fp = popen("ls /sys/class/power_supply/ | grep -E '^BAT' | head -1", "r");
+    char battery_name[64] = {0};
+    int has_battery = 0;
+    if (check_fp)
+    {
+        if (fgets(battery_name, sizeof(battery_name), check_fp))
+        {
+            battery_name[strcspn(battery_name, "\n")] = 0;
+            has_battery = strlen(battery_name) > 0;
+        }
+        pclose(check_fp);
+    }
+
+    if (!has_battery)
+    {
+        return 100;
+    }
+
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd), "cat /sys/class/power_supply/%s/capacity 2>/dev/null", battery_name);
+
+    FILE *fp = popen(cmd, "r");
     if (fp)
     {
         int level = 85;
@@ -1038,6 +1381,24 @@ int get_battery_level()
 
 void get_network_status()
 {
+    FILE *check_fp = popen("ip link show | grep -v 'lo:' | grep -E '^[0-9]+:' | head -1", "r");
+    char iface_line[128] = {0};
+    int has_iface = 0;
+    if (check_fp)
+    {
+        if (fgets(iface_line, sizeof(iface_line), check_fp))
+        {
+            has_iface = strlen(iface_line) > 0;
+        }
+        pclose(check_fp);
+    }
+
+    if (!has_iface)
+    {
+        strcpy(network_status, "No network card detected");
+        return;
+    }
+
     FILE *fp = popen("nmcli -t -f NAME connection show --active 2>/dev/null | head -1", "r");
     if (fp)
     {
@@ -1101,21 +1462,6 @@ void update_status_icons()
         const char *wifi_icon = wifi_state ? "assets/wifi_on.png" : "assets/wifi_off.png";
         GooeyImage_SetImage(wifi_status_icon, wifi_icon);
     }
-/*int bluetooth_state = get_system_bluetooth_state();
-    if (bluetooth_status_icon)
-    {
-        const char *bluetooth_icon = bluetooth_state ? "assets/bluetooth_on.png" : NULL;
-        if (bluetooth_icon == NULL)
-        {
-            GooeyWidget_MakeVisible(bluetooth_status_icon, false);
-        }
-        else
-        {
-            GooeyWidget_MakeVisible(bluetooth_status_icon, true);
-            GooeyImage_SetImage(bluetooth_status_icon, bluetooth_icon);
-        }
-    }*/
-    
 
     if (volume_status_icon)
     {
@@ -1322,7 +1668,7 @@ void create_control_panel()
     system_title = GooeyLabel_Create("System Info", 0.35f, label_x, current_y);
     GooeyLabel_SetColor(system_title, 0xAAAAAA);
 
-    current_y += 40;
+    current_y += 25;
     char battery_text[32];
     snprintf(battery_text, sizeof(battery_text), "Battery: %d%%", battery_level);
     battery_label = GooeyLabel_Create(battery_text, 0.3f, label_x, current_y + 8);
@@ -1332,7 +1678,11 @@ void create_control_panel()
     network_label = GooeyLabel_Create(network_status, 0.3f, label_x, current_y + 8);
     GooeyLabel_SetColor(network_label, 0xCCCCCC);
 
-    current_y += 50;
+    current_y += 25;
+    unsupported_devices_label = GooeyLabel_Create("Some devices may not be supported on this system", 0.26f, label_x, current_y + 8);
+    GooeyLabel_SetColor(unsupported_devices_label, 0x888888);
+
+    current_y += 25;
     settings_label = GooeyLabel_Create("Visit settings:", 0.3f, label_x, current_y + 18);
     GooeyLabel_SetColor(settings_label, 0xCCCCCC);
     settings_button = GooeyButton_Create("Open", slider_x, current_y, 100, 30, run_systemsettings, NULL);
@@ -1358,6 +1708,7 @@ void create_control_panel()
     GooeyWindow_RegisterWidget(win, system_title);
     GooeyWindow_RegisterWidget(win, battery_label);
     GooeyWindow_RegisterWidget(win, network_label);
+    GooeyWindow_RegisterWidget(win, unsupported_devices_label);
 }
 
 void destroy_control_panel()
@@ -1393,6 +1744,7 @@ void set_control_panel_visibility(int visible)
     GooeyWidget_MakeVisible(system_title, visible);
     GooeyWidget_MakeVisible(battery_label, visible);
     GooeyWidget_MakeVisible(network_label, visible);
+    GooeyWidget_MakeVisible(unsupported_devices_label, visible);
 
     glps_thread_mutex_unlock(&ui_update_mutex);
 }
@@ -1578,7 +1930,6 @@ void create_status_icons()
 
 int main(int argc, char **argv)
 {
-
     printf("Starting Gooey Desktop...\n");
 
     glps_thread_mutex_init(&managed_windows_mutex, NULL);
@@ -1669,7 +2020,7 @@ int main(int argc, char **argv)
     printf("Screen resolution: %dx%d\n", screen_info.width, screen_info.height);
     printf("Click the settings icon to toggle control panel visibility\n");
     printf("Open apps will appear in the dock at the bottom\n");
-
+    open_wallpaper_settings();
     GooeyWindow_Run(1, win);
 
     printf("Stopping threads...\n");
