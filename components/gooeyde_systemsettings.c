@@ -18,6 +18,8 @@
 #include <GLPS/glps_thread.h>
 #include <time.h>
 #include <sys/statvfs.h>
+#include <sys/wait.h>
+#include "utils/devices_helper.h"
 
 GooeyTabs *settings_tabs = NULL;
 GooeyWindow *win = NULL;
@@ -89,9 +91,6 @@ static bool is_muted = false;
 static int current_volume = 50;
 static gthread_mutex_t audio_mutex;
 
-/**
- * @brief Safely copies a string to a destination buffer with size limit.
- */
 static void safe_string_copy(char *dest, const char *src, size_t dest_size)
 {
     if (dest && src && dest_size > 0)
@@ -101,9 +100,6 @@ static void safe_string_copy(char *dest, const char *src, size_t dest_size)
     }
 }
 
-/**
- * @brief Trims leading and trailing whitespace from a string.
- */
 static void trim_whitespace(char *str)
 {
     if (!str)
@@ -132,7 +128,6 @@ static void extract_audio_device_name(const char *long_name, char *short_name, s
 
     if (strstr(long_name, "alsa_output") != NULL)
     {
-
         const char *last_dot = strrchr(long_name, '.');
         if (last_dot)
         {
@@ -145,7 +140,6 @@ static void extract_audio_device_name(const char *long_name, char *short_name, s
     }
     else if (strstr(long_name, "alsa_input") != NULL)
     {
-
         const char *last_dot = strrchr(long_name, '.');
         if (last_dot)
         {
@@ -166,7 +160,6 @@ static void extract_audio_device_name(const char *long_name, char *short_name, s
     }
     else
     {
-
         strncpy(short_name, long_name, size - 1);
         short_name[size - 1] = '\0';
         if (strlen(short_name) == size - 1)
@@ -179,29 +172,6 @@ static void extract_audio_device_name(const char *long_name, char *short_name, s
     }
 }
 
-/**
- * @brief Checks if required system commands are available.
- */
-static bool check_system_commands()
-{
-    const char *commands[] = {"nmcli", "bluetoothctl", "pactl", "xrandr"};
-    bool all_available = true;
-    for (int i = 0; i < 4; i++)
-    {
-        char cmd[64];
-        snprintf(cmd, sizeof(cmd), "which %s > /dev/null 2>&1", commands[i]);
-        if (system(cmd) != 0)
-        {
-            fprintf(stderr, "Warning: %s not found. Some features may not work.\n", commands[i]);
-            all_available = false;
-        }
-    }
-    return all_available;
-}
-
-/**
- * @brief Retrieves the current Wi-Fi connection SSID.
- */
 static void get_current_wifi_connection(char *ssid, size_t size)
 {
     if (!ssid || size == 0)
@@ -219,9 +189,6 @@ static void get_current_wifi_connection(char *ssid, size_t size)
     }
 }
 
-/**
- * @brief Updates the Wi-Fi status label and visibility of disconnect button.
- */
 static void update_wifi_status()
 {
     if (!wifi_status_label)
@@ -356,9 +323,6 @@ static void *wifi_scan_thread(void *arg)
     return NULL;
 }
 
-/**
- * @brief Initiates a Wi-Fi network scan.
- */
 static void refresh_wifi_list()
 {
     glps_thread_mutex_lock(&wifi_mutex);
@@ -383,9 +347,6 @@ static void refresh_wifi_list()
     }
 }
 
-/**
- * @brief Connects to a Wi-Fi network in a separate thread.
- */
 static void *connect_to_network_thread(void *arg)
 {
     char *ssid = (char *)arg;
@@ -416,10 +377,7 @@ static void *connect_to_network_thread(void *arg)
     return NULL;
 }
 
-/**
- * @brief Callback for selecting a Wi-Fi network.
- */
-static void connect_to_network_callback(int index)
+static void connect_to_network_callback(int index, void *user_data)
 {
     glps_thread_mutex_lock(&wifi_mutex);
     if (index <= 0 || index > wifi_count)
@@ -452,9 +410,6 @@ static void connect_to_network_callback(int index)
     }
 }
 
-/**
- * @brief Disconnects from the current Wi-Fi network.
- */
 static void *wifi_disconnect_thread(void *arg)
 {
     if (system("nmcli dev disconnect wlan0 > /dev/null 2>&1") != 0)
@@ -467,10 +422,7 @@ static void *wifi_disconnect_thread(void *arg)
     return NULL;
 }
 
-/**
- * @brief Callback for the disconnect Wi-Fi button.
- */
-static void disconnect_wifi_callback()
+static void disconnect_wifi_callback(void *user_data)
 {
     gthread_t thread;
     if (glps_thread_create(&thread, NULL, wifi_disconnect_thread, NULL) == 0)
@@ -496,10 +448,7 @@ static void *wifi_toggle_thread(void *arg)
     return NULL;
 }
 
-/**
- * @brief Callback for the Wi-Fi switch.
- */
-static void wifi_switch_callback(bool enabled)
+static void wifi_switch_callback(bool enabled, void *user_data)
 {
     is_wifi_enabled = enabled;
     gthread_t thread;
@@ -535,37 +484,16 @@ static void wifi_switch_callback(bool enabled)
     refresh_wifi_list();
 }
 
-/**
- * @brief Checks if Wi-Fi is enabled.
- */
 static bool get_wifi_enabled()
 {
-    FILE *fp = popen("nmcli radio wifi 2>/dev/null", "r");
-    if (!fp)
-        return false;
-
-    char state[16] = {0};
-    if (fgets(state, sizeof(state), fp))
-    {
-        pclose(fp);
-        trim_whitespace(state);
-        return (strncmp(state, "enabled", 7) == 0);
-    }
-    pclose(fp);
-    return false;
+    return get_system_wifi_state();
 }
 
-/**
- * @brief Callback for the refresh Wi-Fi button.
- */
-static void refresh_button_callback()
+static void refresh_button_callback(void *user_data)
 {
     refresh_wifi_list();
 }
 
-/**
- * @brief Updates the Bluetooth status label.
- */
 static void update_bluetooth_status()
 {
     if (!bt_status_label)
@@ -603,9 +531,6 @@ static void update_bluetooth_status()
     GooeyLabel_SetText(bt_status_label, status_text);
 }
 
-/**
- * @brief Scans for Bluetooth devices in a separate thread.
- */
 static void *bluetooth_scan_thread(void *arg)
 {
     glps_thread_mutex_lock(&bt_mutex);
@@ -693,9 +618,6 @@ static void *bluetooth_scan_thread(void *arg)
     return NULL;
 }
 
-/**
- * @brief Initiates a Bluetooth device scan.
- */
 static void refresh_bluetooth_list()
 {
     glps_thread_mutex_lock(&bt_mutex);
@@ -751,10 +673,7 @@ static void *connect_to_bluetooth_thread(void *arg)
     return NULL;
 }
 
-/**
- * @brief Callback for selecting a Bluetooth device.
- */
-static void connect_to_bluetooth_callback(int index)
+static void connect_to_bluetooth_callback(int index, void *user_data)
 {
     glps_thread_mutex_lock(&bt_mutex);
     if (index <= 0 || index > bt_count)
@@ -787,9 +706,6 @@ static void connect_to_bluetooth_callback(int index)
     }
 }
 
-/**
- * @brief Toggles Bluetooth power state.
- */
 static void *bluetooth_toggle_thread(void *arg)
 {
     bool enabled = *(bool *)arg;
@@ -802,10 +718,7 @@ static void *bluetooth_toggle_thread(void *arg)
     return NULL;
 }
 
-/**
- * @brief Callback for the Bluetooth switch.
- */
-static void bluetooth_switch_callback(bool enabled)
+static void bluetooth_switch_callback(bool enabled, void *user_data)
 {
     is_bt_enabled = enabled;
 
@@ -841,38 +754,17 @@ static void bluetooth_switch_callback(bool enabled)
     }
 }
 
-/**
- * @brief Checks if Bluetooth is enabled.
- */
 static bool get_bluetooth_enabled()
 {
-    FILE *fp = popen("bluetoothctl show 2>/dev/null | grep 'Powered:' | awk '{print $2}'", "r");
-    if (!fp)
-        return false;
-
-    char state[16] = {0};
-    if (fgets(state, sizeof(state), fp))
-    {
-        pclose(fp);
-        trim_whitespace(state);
-        return (strncmp(state, "yes", 3) == 0);
-    }
-    pclose(fp);
-    return false;
+    return get_system_bluetooth_state();
 }
 
-/**
- * @brief Callback for the refresh Bluetooth button.
- */
-static void refresh_bluetooth_button_callback()
+static void refresh_bluetooth_button_callback(void *user_data)
 {
     refresh_bluetooth_list();
 }
 
-/**
- * @brief Adjusts screen brightness using a more reliable method.
- */
-static void brightness_slider_callback(float value)
+static void brightness_slider_callback(float value, void *user_data)
 {
     if (value < 0.1f)
         value = 0.1f;
@@ -880,7 +772,6 @@ static void brightness_slider_callback(float value)
         value = 1.0f;
 
     char cmd[256];
-
     int success = 0;
 
     snprintf(cmd, sizeof(cmd),
@@ -902,11 +793,9 @@ static void brightness_slider_callback(float value)
 
     if (!success)
     {
-        snprintf(cmd, sizeof(cmd), "echo %.0f > /sys/class/backlight/*/brightness 2>/dev/null", value * 100);
-        if (system(cmd) == 0)
-        {
-            success = 1;
-        }
+        int brightness_value = (int)(value * get_max_brightness());
+        change_display_brightness(brightness_value);
+        success = 1;
     }
 
     if (!success)
@@ -919,30 +808,11 @@ static void brightness_slider_callback(float value)
     }
 }
 
-/**
- * @brief Gets current volume level from system.
- */
 static int get_current_volume_level()
 {
-    FILE *fp = popen("pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | head -1 | grep -o '[0-9]*%' | head -1 | tr -d '%'", "r");
-    if (fp)
-    {
-        char volume_str[16] = {0};
-        if (fgets(volume_str, sizeof(volume_str), fp))
-        {
-            trim_whitespace(volume_str);
-            int volume = atoi(volume_str);
-            pclose(fp);
-            return volume;
-        }
-        pclose(fp);
-    }
-    return 50;
+    return get_system_volume();
 }
 
-/**
- * @brief Gets current mute state from system.
- */
 static bool get_current_mute_state()
 {
     FILE *fp = popen("pactl get-sink-mute @DEFAULT_SINK@ 2>/dev/null | grep -q 'Mute: yes' && echo 1 || echo 0", "r");
@@ -960,46 +830,33 @@ static bool get_current_mute_state()
     return false;
 }
 
-/**
- * @brief Updates the master volume and status label.
- */
-static void master_volume_callback(float value)
+static void master_volume_callback(long value, void *user_data)
 {
-
     char cmd[128];
     int volume = (int)(value * 100);
     volume = (volume < 0) ? 0 : (volume > 100) ? 100
                                                : volume;
 
     current_volume = volume;
-
-    snprintf(cmd, sizeof(cmd), "pactl set-sink-volume @DEFAULT_SINK@ %d%% 2>/dev/null", volume);
-    if (system(cmd) != 0)
-    {
-        return;
-    }
+    change_system_volume(volume);
 
     char status[64];
     snprintf(status, sizeof(status), "Volume: %d%%", volume);
 }
 
-/**
- * @brief Toggles mute state.
- */
-static void mute_switch_callback(bool muted)
+static void mute_switch_callback(bool muted, void *user_data)
 {
-
     is_muted = muted;
-    char cmd[128];
-    snprintf(cmd, sizeof(cmd), "pactl set-sink-mute @DEFAULT_SINK@ %d 2>/dev/null", muted ? 1 : 0);
-    if (system(cmd) != 0)
+    if (muted)
     {
-        return;
+        execute_system_command("pactl set-sink-mute @DEFAULT_SINK@ 1");
+    }
+    else
+    {
+        execute_system_command("pactl set-sink-mute @DEFAULT_SINK@ 0");
     }
 }
-/**
- * @brief Refreshes the audio devices dropdown in a separate thread.
- */
+
 static void *refresh_audio_devices_thread(void *arg)
 {
     glps_thread_mutex_lock(&audio_mutex);
@@ -1055,7 +912,7 @@ static void *refresh_audio_devices_thread(void *arg)
 
     if (master_volume_slider)
     {
-        master_volume_slider->value = current_system_volume;
+        master_volume_slider->value = current_system_volume / 100.0f;
         current_volume = current_system_volume;
     }
 
@@ -1068,12 +925,9 @@ static void *refresh_audio_devices_thread(void *arg)
     glps_thread_mutex_unlock(&audio_mutex);
     return NULL;
 }
-/**
- * @brief Callback for the refresh audio devices button.
- */
-static void refresh_audio_callback()
-{
 
+static void refresh_audio_callback(void *user_data)
+{
     gthread_t thread;
     if (glps_thread_create(&thread, NULL, refresh_audio_devices_thread, NULL) == 0)
     {
@@ -1081,10 +935,7 @@ static void refresh_audio_callback()
     }
 }
 
-/**
- * @brief Callback for selecting an audio device from the dropdown.
- */
-static void audio_device_selection_callback(int index)
+static void audio_device_selection_callback(int index, void *user_data)
 {
     if (index < 0 || index >= audio_device_count)
         return;
@@ -1096,7 +947,6 @@ static void audio_device_selection_callback(int index)
     snprintf(cmd, sizeof(cmd), "pactl set-default-sink %s 2>/dev/null", device_id);
     if (system(cmd) != 0)
     {
-
         glps_thread_mutex_unlock(&audio_mutex);
         return;
     }
@@ -1104,9 +954,6 @@ static void audio_device_selection_callback(int index)
     glps_thread_mutex_unlock(&audio_mutex);
 }
 
-/**
- * @brief Refreshes the process list in a separate thread.
- */
 static void *refresh_processes_thread(void *arg)
 {
     glps_thread_mutex_lock(&process_mutex);
@@ -1157,10 +1004,7 @@ static void *refresh_processes_thread(void *arg)
     return NULL;
 }
 
-/**
- * @brief Callback for the refresh processes button.
- */
-static void refresh_processes_callback()
+static void refresh_processes_callback(void *user_data)
 {
     gthread_t thread;
     if (glps_thread_create(&thread, NULL, refresh_processes_thread, NULL) == 0)
@@ -1169,10 +1013,7 @@ static void refresh_processes_callback()
     }
 }
 
-/**
- * @brief Callback for selecting a process from the list.
- */
-static void process_selection_callback(int index)
+static void process_selection_callback(int index, void *user_data)
 {
     if (index <= 0)
         return;
@@ -1188,10 +1029,7 @@ static void process_selection_callback(int index)
     glps_thread_mutex_unlock(&process_mutex);
 }
 
-/**
- * @brief Callback for the kill process button.
- */
-static void kill_process_callback()
+static void kill_process_callback(void *user_data)
 {
     if (selected_process_pid <= 0)
         return;
@@ -1206,12 +1044,9 @@ static void kill_process_callback()
     selected_process_pid = -1;
     if (kill_process_btn)
         GooeyWidget_MakeVisible(kill_process_btn, false);
-    refresh_processes_callback();
+    refresh_processes_callback(NULL);
 }
 
-/**
- * @brief Refreshes storage information in a separate thread.
- */
 static void *refresh_storage_thread(void *arg)
 {
     storage_count = 0;
@@ -1255,10 +1090,7 @@ static void *refresh_storage_thread(void *arg)
     return NULL;
 }
 
-/**
- * @brief Callback for the refresh storage button.
- */
-static void refresh_storage_callback()
+static void refresh_storage_callback(void *user_data)
 {
     gthread_t thread;
     if (glps_thread_create(&thread, NULL, refresh_storage_thread, NULL) == 0)
@@ -1267,9 +1099,6 @@ static void refresh_storage_callback()
     }
 }
 
-/**
- * @brief Creates the System tab UI.
- */
 static void create_system_ui()
 {
     if (!settings_tabs || !win)
@@ -1277,7 +1106,7 @@ static void create_system_ui()
 
     int y_ref = 200;
 
-    GooeyImage *gooeyde_logo = GooeyImage_Create("assets/gooeyde_logo.png", 50, y_ref - 128, 128, 128, NULL);
+    GooeyImage *gooeyde_logo = GooeyImage_Create("assets/gooeyde_logo.png", 50, y_ref - 128, 128, 128, NULL, NULL);
     if (!gooeyde_logo)
         return;
 
@@ -1397,9 +1226,6 @@ static void create_system_ui()
     GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)kernel_value);
 }
 
-/**
- * @brief Creates the Audio tab UI with a dropdown for device selection.
- */
 static void create_audio_ui()
 {
     if (!settings_tabs || !win)
@@ -1407,19 +1233,19 @@ static void create_audio_ui()
 
     int y_ref = 130;
 
-    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 80, NULL);
+    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 80, NULL, NULL);
     GooeyCanvas_DrawRectangle(header, 0, 0, 800, 80, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
     GooeyLabel *section_title = GooeyLabel_Create("Settings/Audio", 0.5f, 30, 50);
     GooeyLabel *master_label = GooeyLabel_Create("Master Volume:", 0.3f, 50, y_ref + 10);
-    master_volume_slider = GooeySlider_Create(300, y_ref, 200, 50, 100, false, master_volume_callback);
+    master_volume_slider = GooeySlider_Create(300, y_ref, 200, 50, 100, false, master_volume_callback, NULL);
 
     GooeyLabel *mute_label = GooeyLabel_Create("Mute:", 0.3f, 50, y_ref + 70);
-    mute_switch = GooeySwitch_Create(150, y_ref + 45, is_muted, 0, mute_switch_callback);
+    mute_switch = GooeySwitch_Create(150, y_ref + 45, is_muted, 0, mute_switch_callback, NULL);
 
     GooeyLabel *device_label = GooeyLabel_Create("Audio Device:", 0.3f, 50, y_ref + 140);
-    audio_devices_dropdown = GooeyDropdown_Create(210, y_ref + 115, 280, 40, NULL, 0, audio_device_selection_callback);
+    audio_devices_dropdown = GooeyDropdown_Create(210, y_ref + 115, 280, 40, NULL, 0, audio_device_selection_callback, NULL);
 
-    refresh_audio_btn = GooeyButton_Create("Refresh Devices", 510, y_ref + 115, 150, 40, refresh_audio_callback);
+    refresh_audio_btn = GooeyButton_Create("Refresh Devices", 510, y_ref + 115, 150, 40, refresh_audio_callback, NULL);
     GooeyTabs_AddWidget(win, settings_tabs, 3, (GooeyWidget *)section_title);
     GooeyTabs_AddWidget(win, settings_tabs, 3, (GooeyWidget *)header);
     GooeyTabs_AddWidget(win, settings_tabs, 3, (GooeyWidget *)master_label);
@@ -1430,12 +1256,9 @@ static void create_audio_ui()
     GooeyTabs_AddWidget(win, settings_tabs, 3, (GooeyWidget *)audio_devices_dropdown);
     GooeyTabs_AddWidget(win, settings_tabs, 3, (GooeyWidget *)refresh_audio_btn);
 
-    refresh_audio_callback();
+    refresh_audio_callback(NULL);
 }
 
-/**
- * @brief Creates the Processes tab UI with header and section title.
- */
 static void create_process_ui()
 {
     if (!settings_tabs || !win)
@@ -1443,16 +1266,16 @@ static void create_process_ui()
 
     int y_ref = 50;
 
-    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 80, NULL);
+    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 80, NULL, NULL);
     GooeyCanvas_DrawRectangle(header, 0, 0, 800, 80, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
     GooeyLabel *section_title = GooeyLabel_Create("Settings/Processes", 0.5f, 30, 50);
 
-    refresh_processes_btn = GooeyButton_Create("Refresh", 400, y_ref - 25, 100, 40, refresh_processes_callback);
-    kill_process_btn = GooeyButton_Create("Kill Process", 510, y_ref - 25, 120, 40, kill_process_callback);
+    refresh_processes_btn = GooeyButton_Create("Refresh", 400, y_ref - 25, 100, 40, refresh_processes_callback, NULL);
+    kill_process_btn = GooeyButton_Create("Kill Process", 510, y_ref - 25, 120, 40, kill_process_callback, NULL);
     if (kill_process_btn)
         GooeyWidget_MakeVisible(kill_process_btn, false);
 
-    process_list = GooeyList_Create(0, y_ref + 30, 650, 520, process_selection_callback);
+    process_list = GooeyList_Create(0, y_ref + 30, 650, 520, process_selection_callback, NULL);
 
     GooeyTabs_AddWidget(win, settings_tabs, 4, (GooeyWidget *)header);
     GooeyTabs_AddWidget(win, settings_tabs, 4, (GooeyWidget *)section_title);
@@ -1460,12 +1283,9 @@ static void create_process_ui()
     GooeyTabs_AddWidget(win, settings_tabs, 4, (GooeyWidget *)kill_process_btn);
     GooeyTabs_AddWidget(win, settings_tabs, 4, (GooeyWidget *)process_list);
 
-    refresh_processes_callback();
+    refresh_processes_callback(NULL);
 }
 
-/**
- * @brief Creates the Storage tab UI with header and section title.
- */
 static void create_storage_ui()
 {
     if (!settings_tabs || !win)
@@ -1473,43 +1293,40 @@ static void create_storage_ui()
 
     int y_ref = 50;
 
-    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 80, NULL);
+    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 80, NULL, NULL);
     GooeyCanvas_DrawRectangle(header, 0, 0, 800, 80, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
     GooeyLabel *section_title = GooeyLabel_Create("Settings/Storage", 0.5f, 30, 50);
 
-    refresh_storage_btn = GooeyButton_Create("Refresh", 530, y_ref - 30, 100, 40, refresh_storage_callback);
+    refresh_storage_btn = GooeyButton_Create("Refresh", 530, y_ref - 30, 100, 40, refresh_storage_callback, NULL);
 
-    storage_list = GooeyList_Create(0, y_ref + 30, 650, 520, NULL);
+    storage_list = GooeyList_Create(0, y_ref + 30, 650, 520, NULL, NULL);
 
     GooeyTabs_AddWidget(win, settings_tabs, 5, (GooeyWidget *)header);
     GooeyTabs_AddWidget(win, settings_tabs, 5, (GooeyWidget *)section_title);
     GooeyTabs_AddWidget(win, settings_tabs, 5, (GooeyWidget *)refresh_storage_btn);
     GooeyTabs_AddWidget(win, settings_tabs, 5, (GooeyWidget *)storage_list);
 
-    refresh_storage_callback();
+    refresh_storage_callback(NULL);
 }
 
-/**
- * @brief Creates the Wi-Fi tab UI.
- */
 static void create_network_ui()
 {
     if (!settings_tabs || !win)
         return;
 
     int y_ref = 50;
-    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 90, NULL);
+    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 90, NULL, NULL);
     GooeyCanvas_DrawRectangle(header, 0, 0, 800, 90, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
     GooeyLabel *section_title = GooeyLabel_Create("Settings/Wi-Fi", 0.5f, 30, 50);
     is_wifi_enabled = get_wifi_enabled();
-    wifi_switch = GooeySwitch_Create(200, y_ref - 25, is_wifi_enabled, 0, wifi_switch_callback);
+    wifi_switch = GooeySwitch_Create(200, y_ref - 25, is_wifi_enabled, 0, wifi_switch_callback, NULL);
 
-    refresh_wifi_btn = GooeyButton_Create("Refresh", 450, y_ref - 10, 100, 40, refresh_button_callback);
-    disconnect_wifi_btn = GooeyButton_Create("Disconnect", 530, y_ref - 10, 120, 40, disconnect_wifi_callback);
+    refresh_wifi_btn = GooeyButton_Create("Refresh", 450, y_ref - 10, 100, 40, refresh_button_callback, NULL);
+    disconnect_wifi_btn = GooeyButton_Create("Disconnect", 530, y_ref - 10, 120, 40, disconnect_wifi_callback, NULL);
 
     wifi_status_label = GooeyLabel_Create("Checking status...", 0.3f, 460, y_ref - 20);
 
-    wifi_list = GooeyList_Create(0, y_ref + 40, 650, 510, connect_to_network_callback);
+    wifi_list = GooeyList_Create(0, y_ref + 40, 650, 510, connect_to_network_callback, NULL);
 
     GooeyTabs_AddWidget(win, settings_tabs, 1, (GooeyWidget *)header);
     GooeyTabs_AddWidget(win, settings_tabs, 1, (GooeyWidget *)section_title);
@@ -1541,27 +1358,24 @@ static void create_network_ui()
     update_wifi_status();
 }
 
-/**
- * @brief Creates the Bluetooth tab UI.
- */
 static void create_bluetooth_ui()
 {
     if (!settings_tabs || !win)
         return;
 
     int y_ref = 50;
-    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 90, NULL);
+    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 90, NULL, NULL);
     GooeyCanvas_DrawRectangle(header, 0, 0, 800, 90, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
     GooeyLabel *section_title = GooeyLabel_Create("Settings/Bluetooth", 0.5f, 30, 50);
 
     is_bt_enabled = get_bluetooth_enabled();
-    bluetooth_switch = GooeySwitch_Create(250, y_ref - 25, is_bt_enabled, 0, bluetooth_switch_callback);
+    bluetooth_switch = GooeySwitch_Create(250, y_ref - 25, is_bt_enabled, 0, bluetooth_switch_callback, NULL);
 
-    refresh_bluetooth_btn = GooeyButton_Create("Scan for devices...", 490, y_ref - 10, 100, 40, refresh_bluetooth_button_callback);
+    refresh_bluetooth_btn = GooeyButton_Create("Scan for devices...", 490, y_ref - 10, 100, 40, refresh_bluetooth_button_callback, NULL);
 
     bt_status_label = GooeyLabel_Create("Checking status...", 0.3f, 490, y_ref - 20);
 
-    bluetooth_list = GooeyList_Create(0, y_ref + 35, 650, 515, connect_to_bluetooth_callback);
+    bluetooth_list = GooeyList_Create(0, y_ref + 35, 650, 515, connect_to_bluetooth_callback, NULL);
 
     GooeyTabs_AddWidget(win, settings_tabs, 2, (GooeyWidget *)header);
     GooeyTabs_AddWidget(win, settings_tabs, 2, (GooeyWidget *)section_title);
@@ -1593,12 +1407,8 @@ static void create_bluetooth_ui()
     update_bluetooth_status();
 }
 
-/**
- * @brief Main entry point for the Gooey Settings application.
- */
 int main(int argc, char **argv)
 {
-
     if (!check_system_commands())
     {
         fprintf(stderr, "Warning: Some system commands are missing. Functionality may be limited.\n");
@@ -1662,7 +1472,6 @@ int main(int argc, char **argv)
     GooeyWindow_Run(1, win);
 
 cleanup:
-
     glps_thread_mutex_destroy(&wifi_mutex);
     glps_thread_mutex_destroy(&bt_mutex);
     glps_thread_mutex_destroy(&process_mutex);

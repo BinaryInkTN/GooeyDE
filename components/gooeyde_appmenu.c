@@ -663,7 +663,7 @@ static void create_ui(void)
         GooeyContainer_AddWidget(main_window, main_container, 0, close_button);
     }
 
-    page_info_label = GooeyLabel_Create("", 0.4f, screen_info.width / 2 - 140, search_y + search_height + 53);
+    page_info_label = GooeyLabel_Create("", 0.4f, screen_info.width / 2 - 140, screen_info.height - 80);
     if (page_info_label)
     {
         GooeyLabel_SetColor(page_info_label, 0xAAAAAA);

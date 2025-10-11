@@ -1,7 +1,0 @@
-#!/bin/bash
-# /usr/local/bin/gooey_shell
-
-# Set up environment
-export XDG_SESSION_TYPE=x11
-# Start your shell
-exec gooey_shell "$@"

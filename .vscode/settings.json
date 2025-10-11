@@ -8,6 +8,8 @@
         "string.h": "c",
         "glps_thread.h": "c",
         "resolution_helper.h": "c",
-        "stdarg.h": "c"
+        "stdarg.h": "c",
+        "type_traits": "cpp",
+        "time.h": "c"
     }
 }

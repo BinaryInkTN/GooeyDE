@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <GLPS/glps_thread.h>
 #include <dbus/dbus.h>
+#include "utils/devices_helper.h"
 
 ScreenInfo screen_info;
 GooeyWindow *win = NULL;
@@ -52,7 +53,7 @@ GooeyButton *wallpaper_cancel_button = NULL;
 GooeyLabel *wallpaper_current_label = NULL;
 GooeyLabel *wallpaper_selected_label = NULL;
 GooeyImage *current_wallpaper_preview = NULL;
-
+GooeyImage *wallpaper = NULL;
 char current_wallpaper_path[256] = "assets/bg.png";
 char selected_wallpaper_path[256] = "";
 int wallpaper_dialog_visible = 0;
@@ -107,13 +108,7 @@ static int dock_button_indices[DOCK_APP_BUTTONS_CAPACITY];
 static GooeyImage *dock_app_minimize_indicators[DOCK_APP_BUTTONS_CAPACITY];
 static GooeyCanvas *dock_app_clickable_areas[DOCK_APP_BUTTONS_CAPACITY];
 void execute_system_command(const char *command);
-int get_system_brightness();
-int get_max_brightness();
-int get_system_volume();
-int get_system_wifi_state();
-int get_system_bluetooth_state();
-int get_battery_level();
-void get_network_status();
+
 void init_system_settings();
 void update_status_icons();
 void run_app_menu();
@@ -202,7 +197,8 @@ void wallpaper_dialog_callback(const char *filename)
         strncpy(selected_wallpaper_path, filename, sizeof(selected_wallpaper_path) - 1);
 
         selected_wallpaper_path[sizeof(selected_wallpaper_path) - 1] = '\0';
-       
+        GooeyImage_Damage(wallpaper);
+        GooeyImage_SetImage(wallpaper, filename);
         if (wallpaper_selected_label)
         {
             char display_text[128];
@@ -329,7 +325,6 @@ void set_wallpaper_dialog_visibility(int visible)
         GooeyWidget_MakeVisible(wallpaper_browse_button, visible);
         GooeyWidget_MakeVisible(wallpaper_cancel_button, visible);
         GooeyWidget_MakeVisible(current_wallpaper_preview, visible);
-
     }
 }
 
@@ -1236,196 +1231,6 @@ void update_dock_apps()
     free(expected_windows);
     free(windows_copy);
 }
-void execute_system_command(const char *command)
-{
-    if (fork() == 0)
-    {
-        execl("/bin/sh", "sh", "-c", command, NULL);
-        perror("Failed to execute command");
-        exit(1);
-    }
-}
-
-int get_system_brightness()
-{
-    FILE *fp = popen("cat /sys/class/backlight/*/brightness 2>/dev/null | head -1", "r");
-    if (fp)
-    {
-        int brightness = 80;
-        if (fscanf(fp, "%d", &brightness) != 1)
-        {
-            brightness = 80;
-        }
-        pclose(fp);
-        return brightness;
-    }
-    return 80;
-}
-
-int get_max_brightness()
-{
-    FILE *fp = popen("cat /sys/class/backlight/*/max_brightness 2>/dev/null | head -1", "r");
-    if (fp)
-    {
-        int max_brightness = 100;
-        if (fscanf(fp, "%d", &max_brightness) != 1)
-        {
-            max_brightness = 100;
-        }
-        pclose(fp);
-        return max_brightness;
-    }
-    return 100;
-}
-
-int get_system_volume()
-{
-    FILE *fp = popen("pactl get-sink-volume @DEFAULT_SINK@ 2>/dev/null | grep -oP '\\d+(?=%)' | head -1", "r");
-    if (fp)
-    {
-        int volume = 75;
-        if (fscanf(fp, "%d", &volume) != 1)
-        {
-            volume = 75;
-        }
-        pclose(fp);
-        return volume;
-    }
-    return 75;
-}
-
-int get_system_wifi_state()
-{
-    FILE *fp = popen("nmcli radio wifi 2>/dev/null", "r");
-    if (fp)
-    {
-        char state[16];
-        if (fgets(state, sizeof(state), fp))
-        {
-            pclose(fp);
-            return strstr(state, "enabled") != NULL;
-        }
-        pclose(fp);
-    }
-    return 1;
-}
-
-int get_system_bluetooth_state()
-{
-    FILE *fp_check = popen("bluetoothctl list 2>/dev/null | grep -q . && echo present", "r");
-    int is_present = 0;
-    if (fp_check)
-    {
-        char present[16];
-        if (fgets(present, sizeof(present), fp_check))
-        {
-            is_present = strstr(present, "present") != NULL;
-        }
-        pclose(fp_check);
-    }
-    if (!is_present)
-    {
-        return 0;
-    }
-
-    FILE *fp = popen("bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' && echo enabled", "r");
-    if (fp)
-    {
-        char state[16];
-        if (fgets(state, sizeof(state), fp))
-        {
-            pclose(fp);
-            return strstr(state, "enabled") != NULL;
-        }
-        pclose(fp);
-    }
-    return 0;
-}
-
-int get_battery_level()
-{
-    FILE *check_fp = popen("ls /sys/class/power_supply/ | grep -E '^BAT' | head -1", "r");
-    char battery_name[64] = {0};
-    int has_battery = 0;
-    if (check_fp)
-    {
-        if (fgets(battery_name, sizeof(battery_name), check_fp))
-        {
-            battery_name[strcspn(battery_name, "\n")] = 0;
-            has_battery = strlen(battery_name) > 0;
-        }
-        pclose(check_fp);
-    }
-
-    if (!has_battery)
-    {
-        return 100;
-    }
-
-    char cmd[128];
-    snprintf(cmd, sizeof(cmd), "cat /sys/class/power_supply/%s/capacity 2>/dev/null", battery_name);
-
-    FILE *fp = popen(cmd, "r");
-    if (fp)
-    {
-        int level = 85;
-        if (fscanf(fp, "%d", &level) != 1)
-        {
-            level = 85;
-        }
-        pclose(fp);
-        return level;
-    }
-    return 85;
-}
-
-void get_network_status()
-{
-    FILE *check_fp = popen("ip link show | grep -v 'lo:' | grep -E '^[0-9]+:' | head -1", "r");
-    char iface_line[128] = {0};
-    int has_iface = 0;
-    if (check_fp)
-    {
-        if (fgets(iface_line, sizeof(iface_line), check_fp))
-        {
-            has_iface = strlen(iface_line) > 0;
-        }
-        pclose(check_fp);
-    }
-
-    if (!has_iface)
-    {
-        strcpy(network_status, "No network card detected");
-        return;
-    }
-
-    FILE *fp = popen("nmcli -t -f NAME connection show --active 2>/dev/null | head -1", "r");
-    if (fp)
-    {
-        char network[128];
-        if (fgets(network, sizeof(network), fp))
-        {
-            network[strcspn(network, "\n")] = 0;
-            if (strlen(network) > 0)
-            {
-                snprintf(network_status, sizeof(network_status), "Connected: %s", network);
-            }
-            else
-            {
-                strcpy(network_status, "Not connected");
-            }
-        }
-        else
-        {
-            strcpy(network_status, "Not connected");
-        }
-        pclose(fp);
-    }
-    else
-    {
-        strcpy(network_status, "Not connected");
-    }
-}
 
 void init_system_settings()
 {
@@ -1443,13 +1248,19 @@ void init_system_settings()
 
     current_volume = get_system_volume();
     battery_level = get_battery_level();
-    get_network_status();
+    get_network_status(network_status);
 
     printf("System settings initialized:\n");
     printf("  Brightness: %d%%\n", current_brightness);
     printf("  Volume: %d%%\n", current_volume);
     printf("  Battery: %d%%\n", battery_level);
     printf("  Network: %s\n", network_status);
+}
+
+void desktop_clicked(void *user_data)
+{
+    set_control_panel_visibility(0);
+    control_panel_visible = 0;
 }
 
 void update_status_icons()
@@ -1615,7 +1426,7 @@ void create_control_panel()
     int panel_x = screen_info.width - panel_width - 10;
     int panel_y = 60;
 
-    control_panel_bg = GooeyImage_Create("assets/control_panel_bg.png", panel_x, panel_y, panel_width, panel_height, NULL, NULL);
+    control_panel_bg = GooeyImage_Create("assets/control_panel_bg.png", panel_x, panel_y, panel_width, panel_height, desktop_clicked, NULL);
 
     panel_title = GooeyLabel_Create("Control Panel", 0.45f, panel_x + 20, panel_y + 45);
     GooeyLabel_SetColor(panel_title, 0xFFFFFF);
@@ -1751,12 +1562,10 @@ void set_control_panel_visibility(int visible)
 
 void wifi_switch_callback(bool value, void *user_data)
 {
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "nmcli radio wifi %s", value ? "on" : "off");
-    execute_system_command(cmd);
+    enable_wifi(value);
     printf("WiFi %s\n", value ? "Enabled" : "Disabled");
 
-    get_network_status();
+    get_network_status(network_status);
 
     glps_thread_mutex_lock(&ui_update_mutex);
     if (network_label)
@@ -1770,10 +1579,7 @@ void wifi_switch_callback(bool value, void *user_data)
 
 void bluetooth_switch_callback(bool value, void *user_data)
 {
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "bluetoothctl power %s", value ? "on" : "off");
-    execute_system_command(cmd);
-    printf("Bluetooth %s\n", value ? "Enabled" : "Disabled");
+    enable_bluetooth(value);
     update_status_icons();
 }
 
@@ -1807,12 +1613,8 @@ void airplane_switch_callback(bool value, void *user_data)
 
 void volume_slider_callback(long value, void *user_data)
 {
+    change_system_volume(value);
     current_volume = value;
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "pactl set-sink-volume @DEFAULT_SINK@ %ld%%", value);
-    execute_system_command(cmd);
-    printf("Volume set to: %ld%%\n", value);
-
     glps_thread_mutex_lock(&ui_update_mutex);
     if (volume_value_label)
     {
@@ -1827,14 +1629,10 @@ void volume_slider_callback(long value, void *user_data)
 
 void brightness_slider_callback(long value, void *user_data)
 {
+    change_display_brightness(value);
     current_brightness = value;
     int max_bright = get_max_brightness();
     int actual_level = (value * max_bright) / 100;
-
-    char cmd[128];
-    snprintf(cmd, sizeof(cmd), "echo %d | sudo tee /sys/class/backlight/*/brightness >/dev/null 2>&1", actual_level);
-    execute_system_command(cmd);
-    printf("Brightness set to: %ld%%\n", value);
 
     glps_thread_mutex_lock(&ui_update_mutex);
     if (brightness_value_label)
@@ -1848,8 +1646,7 @@ void brightness_slider_callback(long value, void *user_data)
 
 void mute_audio_callback()
 {
-    execute_system_command("pactl set-sink-mute @DEFAULT_SINK@ toggle");
-    printf("Audio mute toggled\n");
+    mute_audio();
     update_status_icons();
 }
 
@@ -1867,7 +1664,7 @@ void refresh_system_info()
         GooeyLabel_SetText(battery_label, battery_text);
     }
 
-    get_network_status();
+    get_network_status(network_status);
     if (network_label)
     {
         GooeyLabel_SetText(network_label, network_status);
@@ -1947,7 +1744,7 @@ int main(int argc, char **argv)
 
     win = GooeyWindow_Create("Gooey Desktop", screen_info.width, screen_info.height, true);
 
-    GooeyImage *wallpaper = GooeyImage_Create("assets/bg.png", 0, 50, screen_info.width, screen_info.height - 50, NULL, NULL);
+    wallpaper = GooeyImage_Create("assets/bg.png", 0, 50, screen_info.width, screen_info.height - 50, NULL, NULL);
     GooeyCanvas *canvas = GooeyCanvas_Create(0, 0, screen_info.width, 50, NULL, NULL);
     GooeyCanvas_DrawRectangle(canvas, 0, 0, screen_info.width, 50, 0x222222, true, 1.0f, true, 1.0f);
     GooeyCanvas_DrawLine(canvas, 50, 0, 50, 50, 0xFFFFFF);
@@ -2009,7 +1806,7 @@ int main(int argc, char **argv)
     if (dock_height < 40)
         dock_height = 40;
     dock_x = (screen_info.width - dock_width) / 2;
-    dock_y = screen_info.height - dock_height - (screen_info.height * 0.10);
+    dock_y = screen_info.height - dock_height;
     if (dock_y < 0)
         dock_y = 0;
 
