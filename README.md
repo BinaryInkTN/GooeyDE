@@ -3,6 +3,8 @@
 A lightweight Gooey based Linux desktop environment for Embedded Devices.
 
 ![preview](preview-0.1.png)
+![settings](settings.png)
+![app_open](app_open.png)
 
 ## How to Build
 
