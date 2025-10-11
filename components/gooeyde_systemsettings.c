@@ -833,15 +833,12 @@ static bool get_current_mute_state()
 static void master_volume_callback(long value, void *user_data)
 {
     char cmd[128];
-    int volume = (int)(value * 100);
-    volume = (volume < 0) ? 0 : (volume > 100) ? 100
-                                               : volume;
 
-    current_volume = volume;
-    change_system_volume(volume);
+    current_volume = value;
+    change_system_volume(value);
 
     char status[64];
-    snprintf(status, sizeof(status), "Volume: %d%%", volume);
+    snprintf(status, sizeof(status), "Volume: %d%%", value);
 }
 
 static void mute_switch_callback(bool muted, void *user_data)
@@ -912,7 +909,7 @@ static void *refresh_audio_devices_thread(void *arg)
 
     if (master_volume_slider)
     {
-        master_volume_slider->value = current_system_volume / 100.0f;
+        master_volume_slider->value = current_system_volume ;
         current_volume = current_system_volume;
     }
 

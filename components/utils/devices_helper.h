@@ -224,10 +224,9 @@ static inline int get_system_wifi_state(void)
  * First verifies Bluetooth hardware is present before checking power state.
  * 
  * @return 1 if Bluetooth is enabled, 0 otherwise
- */
-static inline int get_system_bluetooth_state(void)
+ */static inline int get_system_bluetooth_state(void)
 {
-    FILE *fp_check = popen("bluetoothctl list 2>/dev/null | grep -q . && echo present", "r");
+    FILE *fp_check = popen("timeout 2 bluetoothctl --wait=1 list 2>/dev/null | grep -q . && echo present", "r");
     int is_present = 0;
     if (fp_check)
     {
@@ -243,7 +242,7 @@ static inline int get_system_bluetooth_state(void)
         return 0;
     }
 
-    FILE *fp = popen("bluetoothctl show 2>/dev/null | grep -q 'Powered: yes' && echo enabled", "r");
+    FILE *fp = popen("timeout 2 bluetoothctl --wait=1 show 2>/dev/null | grep -q 'Powered: yes' && echo enabled", "r");
     if (fp)
     {
         char state[16];

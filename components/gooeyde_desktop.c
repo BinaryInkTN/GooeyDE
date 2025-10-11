@@ -1817,7 +1817,7 @@ int main(int argc, char **argv)
     printf("Screen resolution: %dx%d\n", screen_info.width, screen_info.height);
     printf("Click the settings icon to toggle control panel visibility\n");
     printf("Open apps will appear in the dock at the bottom\n");
-    open_wallpaper_settings();
+    //open_wallpaper_settings();
     GooeyWindow_Run(1, win);
 
     printf("Stopping threads...\n");
