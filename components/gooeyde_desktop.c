@@ -1121,6 +1121,7 @@ void remove_dock_app_button(const char *window_id)
         {
             int new_x = dock_x + (j * (DOCK_APP_SIZE + DOCK_APP_MARGIN)) + DOCK_APP_MARGIN;
             int new_y = dock_y + (dock_height - DOCK_APP_SIZE) / 2;
+            GooeyWidget_MoveTo(dock_app_buttons[j], new_x, new_y);
         }
     }
 
