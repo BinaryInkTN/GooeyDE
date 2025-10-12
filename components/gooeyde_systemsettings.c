@@ -1103,7 +1103,7 @@ static void create_system_ui()
 
     int y_ref = 200;
 
-    GooeyImage *gooeyde_logo = GooeyImage_Create("assets/gooeyde_logo.png", 50, y_ref - 128, 128, 128, NULL, NULL);
+    GooeyImage *gooeyde_logo = GooeyImage_Create("/usr/local/share/gooeyde/assets/gooeyde_logo.png", 50, y_ref - 128, 128, 128, NULL, NULL);
     if (!gooeyde_logo)
         return;
 
@@ -1429,7 +1429,7 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    GooeyTheme *dark_theme = GooeyTheme_LoadFromFile("assets/dark.json");
+    GooeyTheme *dark_theme = GooeyTheme_LoadFromFile("/usr/local/share/gooeyde/assets/dark.json");
     if (dark_theme)
     {
         GooeyWindow_SetTheme(win, dark_theme);

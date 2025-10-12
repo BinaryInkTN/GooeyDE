@@ -10,6 +10,7 @@
         "resolution_helper.h": "c",
         "stdarg.h": "c",
         "type_traits": "cpp",
-        "time.h": "c"
+        "time.h": "c",
+        "devices_helper.h": "c"
     }
 }

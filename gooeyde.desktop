@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=gooey_shell
+Comment=My Custom X11 Desktop Environment
+Exec=/usr/local/bin/gooey_session
+TryExec=/usr/local/bin/gooey_session
+Type=Application
+X-GDM-SessionRegisters=true
+DesktopNames=gooey_shell

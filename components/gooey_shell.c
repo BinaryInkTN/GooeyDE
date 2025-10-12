@@ -27,6 +27,7 @@ static gthread_t dbus_thread;
 static gthread_mutex_t dbus_mutex;
 static int window_list_update_pending = 0;
 static int pending_x_flush = 0;
+int IgnoreXError(Display *d, XErrorEvent *e) { return 0; }
 
 static void InitializeAtoms(Display *display);
 static int InitializeMultiMonitor(GooeyShellState *state);
@@ -329,7 +330,7 @@ static void SendWindowListThroughDBus(GooeyShellState *state)
             snprintf(window_id, sizeof(window_id), "%lu", opened_windows[i]);
             const char *id_str = window_id;
             const char *title_str = node->title ? node->title : "";
-            const char *icon_path_str ="";
+            const char *icon_path_str = "";
 
             if (dbus_message_iter_open_container(&array_iter, DBUS_TYPE_STRUCT, NULL, &struct_iter))
             {
@@ -944,6 +945,11 @@ static void UpdateWindowGeometry(GooeyShellState *state, WindowNode *node)
 
         XMoveWindow(state->display, node->client, client_x, client_y);
         XResizeWindow(state->display, node->client, node->width, node->height);
+
+        if (!node->is_titlebar_disabled)
+        {
+            DrawTitleBar(state, node);
+        }
     }
 }
 
@@ -2092,7 +2098,6 @@ void GooeyShell_RunEventLoop(GooeyShellState *state)
                 }
                 break;
             }
-
             case ConfigureRequest:
             {
                 WindowNode *node = FindWindowNodeByClient(state, ev.xconfigurerequest.window);
@@ -2100,13 +2105,9 @@ void GooeyShell_RunEventLoop(GooeyShellState *state)
                 {
                     node->width = (ev.xconfigurerequest.width > 0) ? ev.xconfigurerequest.width : node->width;
                     node->height = (ev.xconfigurerequest.height > 0) ? ev.xconfigurerequest.height : node->height;
-
                     UpdateWindowGeometry(state, node);
-
                     if (!node->is_titlebar_disabled)
-                    {
                         DrawTitleBar(state, node);
-                    }
                 }
                 else if (!node)
                 {
@@ -2119,8 +2120,12 @@ void GooeyShell_RunEventLoop(GooeyShellState *state)
                     changes.sibling = ev.xconfigurerequest.above;
                     changes.stack_mode = ev.xconfigurerequest.detail;
 
+                    // temporarily ignore X errors here
+                    XErrorHandler old = XSetErrorHandler(IgnoreXError);
                     XConfigureWindow(state->display, ev.xconfigurerequest.window,
                                      ev.xconfigurerequest.value_mask, &changes);
+                    XSync(state->display, False);
+                    XSetErrorHandler(old);
                 }
                 break;
             }

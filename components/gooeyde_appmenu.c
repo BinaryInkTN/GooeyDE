@@ -657,7 +657,7 @@ static void create_ui(void)
         GooeyContainer_AddWidget(main_window, main_container, 0, search_input);
     }
 
-    close_button = GooeyImage_Create("assets/cross.png", screen_info.width - 50, 15, 24, 24, close_application, NULL);
+    close_button = GooeyImage_Create("/usr/local/share/gooeyde/cross.png", screen_info.width - 50, 15, 24, 24, close_application, NULL);
     if (close_button)
     {
         GooeyContainer_AddWidget(main_window, main_container, 0, close_button);

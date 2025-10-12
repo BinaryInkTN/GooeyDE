@@ -54,7 +54,8 @@ GooeyLabel *wallpaper_current_label = NULL;
 GooeyLabel *wallpaper_selected_label = NULL;
 GooeyImage *current_wallpaper_preview = NULL;
 GooeyImage *wallpaper = NULL;
-char current_wallpaper_path[256] = "assets/bg.png";
+GooeyButton *logout_button = NULL;
+char current_wallpaper_path[256] = "/usr/local/share/gooeyde/assets/bg.png";
 char selected_wallpaper_path[256] = "";
 int wallpaper_dialog_visible = 0;
 
@@ -99,8 +100,8 @@ static int dock_y = 0;
 #define DBUS_PATH "/dev/binaryink/gshell"
 #define DBUS_INTERFACE "dev.binaryink.gshell"
 
-#define DOCK_APP_SIZE 48
-#define DOCK_APP_MARGIN 10
+#define DOCK_APP_SIZE 32
+#define DOCK_APP_MARGIN 15
 #define DOCK_APP_MAX 8
 #define DOCK_APP_BUTTONS_CAPACITY 8
 
@@ -153,6 +154,12 @@ void set_wallpaper(const char *filename);
 void create_wallpaper_dialog();
 void destroy_wallpaper_dialog();
 void set_wallpaper_dialog_visibility(int visible);
+
+void logout_callback(void *user_data)
+{
+    execute_system_command("loginctl terminal-user $USER");
+}
+
 void set_wallpaper(const char *filename)
 {
     if (!filename || strlen(filename) == 0)
@@ -253,7 +260,7 @@ void create_wallpaper_dialog()
     int dialog_x = (screen_info.width - dialog_width) / 2;
     int dialog_y = (screen_info.height - dialog_height) / 2;
 
-    wallpaper_dialog_bg = GooeyImage_Create("assets/control_panel_bg.png",
+    wallpaper_dialog_bg = GooeyImage_Create("/usr/local/share/gooeyde/assets/control_panel_bg.png",
                                             dialog_x,
                                             dialog_y,
                                             dialog_width,
@@ -806,7 +813,7 @@ void remove_managed_window(const char *window_id)
 const char *get_fallback_icon_for_title(const char *title)
 {
     if (!title)
-        return "assets/app_default.png";
+        return "/usr/local/share/gooeyde/assets/app_default.png";
 
     printf("Looking for fallback icon for app: %s\n", title);
 
@@ -823,75 +830,75 @@ const char *get_fallback_icon_for_title(const char *title)
     if (strstr(lower_title, "firefox") || strstr(lower_title, "mozilla") || strstr(lower_title, "browser"))
     {
         printf("Matched Firefox/Browser icon\n");
-        return "assets/firefox.png";
+        return "/usr/local/share/gooeyde/assets/firefox.png";
     }
     else if (strstr(lower_title, "terminal") || strstr(lower_title, "term") ||
              strstr(lower_title, "gnome-terminal") || strstr(lower_title, "konsole") ||
              strstr(lower_title, "xterm"))
     {
         printf("Matched Terminal icon\n");
-        return "assets/terminal.png";
+        return "/usr/local/share/gooeyde/assets/terminal.png";
     }
     else if (strstr(lower_title, "file") || strstr(lower_title, "nautilus") ||
              strstr(lower_title, "dolphin") || strstr(lower_title, "thunar") ||
              strstr(lower_title, "pcmanfm"))
     {
         printf("Matched File Manager icon\n");
-        return "assets/files.png";
+        return "/usr/local/share/gooeyde/assets/files.png";
     }
     else if (strstr(lower_title, "text") || strstr(lower_title, "editor") ||
              strstr(lower_title, "gedit") || strstr(lower_title, "kate") ||
              strstr(lower_title, "vim") || strstr(lower_title, "nano"))
     {
         printf("Matched Text Editor icon\n");
-        return "assets/text_editor.png";
+        return "/usr/local/share/gooeyde/assets/text_editor.png";
     }
     else if (strstr(lower_title, "calculator") || strstr(lower_title, "calc") ||
              strstr(lower_title, "gnome-calculator"))
     {
         printf("Matched Calculator icon\n");
-        return "assets/calculator.png";
+        return "/usr/local/share/gooeyde/assets/calculator.png";
     }
     else if (strstr(lower_title, "music") || strstr(lower_title, "audio") ||
              strstr(lower_title, "rhythmbox") || strstr(lower_title, "amarok") ||
              strstr(lower_title, "spotify"))
     {
         printf("Matched Music icon\n");
-        return "assets/music.png";
+        return "/usr/local/share/gooeyde/assets/music.png";
     }
     else if (strstr(lower_title, "video") || strstr(lower_title, "player") ||
              strstr(lower_title, "vlc") || strstr(lower_title, "mpv") ||
              strstr(lower_title, "smplayer"))
     {
         printf("Matched Video icon\n");
-        return "assets/video.png";
+        return "/usr/local/share/gooeyde/assets/video.png";
     }
     else if (strstr(lower_title, "settings") || strstr(lower_title, "config") ||
              strstr(lower_title, "control") || strstr(lower_title, "system settings"))
     {
         printf("Matched Settings icon\n");
-        return "assets/settings.png";
+        return "/usr/local/share/gooeyde/assets/settings.png";
     }
     else if (strstr(lower_title, "libreoffice") || strstr(lower_title, "writer") ||
              strstr(lower_title, "calc") || strstr(lower_title, "impress"))
     {
         printf("Matched Office icon\n");
-        return "assets/libreoffice.png";
+        return "/usr/local/share/gooeyde/assets/libreoffice.png";
     }
     else if (strstr(lower_title, "gimp") || strstr(lower_title, "image") ||
              strstr(lower_title, "photo"))
     {
         printf("Matched Image Editor icon\n");
-        return "assets/gimp.png";
+        return "/usr/local/share/gooeyde/assets/gimp.png";
     }
     else if (strstr(lower_title, "chrome") || strstr(lower_title, "chromium"))
     {
         printf("Matched Chrome icon\n");
-        return "assets/chrome.png";
+        return "/usr/local/share/gooeyde/assets/chrome.png";
     }
 
     printf("No specific icon found, using default\n");
-    return "assets/app_default.png";
+    return "/usr/local/share/gooeyde/assets/app_default.png";
 }
 void cleanup_dock_app_buttons()
 {
@@ -990,7 +997,7 @@ void create_dock_app_button(const char *window_id, const char *title, const char
     {
         actual_icon_path = get_fallback_icon_for_title(title);
     }
-    actual_icon_path = "assets/app_default.png";
+    actual_icon_path = "/usr/local/share/gooeyde/assets/app_default.png";
     printf("Creating dock button for '%s' with icon: %s\n", title, actual_icon_path);
 
     dock_app_buttons[dock_app_buttons_count] = (GooeyImage *)GooeyImage_Create(
@@ -1020,11 +1027,11 @@ void create_dock_app_button(const char *window_id, const char *title, const char
                                   DOCK_APP_SIZE,
                                   0xFF0000, false, 0.0f, true, 0.0f);
         dock_app_minimize_indicators[dock_app_buttons_count] = GooeyImage_Create(
-            "assets/minimized_icon.png",
-            button_x + DOCK_APP_SIZE / 2 - 7,
-            button_y - 6,
-            16,
-            16,
+            "/usr/local/share/gooeyde/assets/minimized_icon.png",
+            button_x + DOCK_APP_SIZE / 2 - 4,
+            button_y - 5,
+            8,
+            8,
             NULL, NULL);
         GooeyWidget_MakeVisible(dock_app_minimize_indicators[dock_app_buttons_count], false);
         GooeyWindow_RegisterWidget(win, dock_app_clickable_areas[dock_app_buttons_count]);
@@ -1271,7 +1278,7 @@ void update_status_icons()
     int wifi_state = get_system_wifi_state();
     if (wifi_status_icon)
     {
-        const char *wifi_icon = wifi_state ? "assets/wifi_on.png" : "assets/wifi_off.png";
+        const char *wifi_icon = wifi_state ? "/usr/local/share/gooeyde/assets/wifi_on.png" : "/usr/local/share/gooeyde/assets/wifi_off.png";
         GooeyImage_SetImage(wifi_status_icon, wifi_icon);
     }
 
@@ -1280,19 +1287,19 @@ void update_status_icons()
         const char *volume_icon;
         if (current_volume == 0)
         {
-            volume_icon = "assets/volume_mute.png";
+            volume_icon = "/usr/local/share/gooeyde/assets/volume_mute.png";
         }
         else if (current_volume > 0 && current_volume <= 33)
         {
-            volume_icon = "assets/volume_medium.png";
+            volume_icon = "/usr/local/share/gooeyde/assets/volume_medium.png";
         }
         else if (current_volume > 33 && current_volume < 66)
         {
-            volume_icon = "assets/volume_medium.png";
+            volume_icon = "/usr/local/share/gooeyde/assets/volume_medium.png";
         }
         else
         {
-            volume_icon = "assets/volume_high.png";
+            volume_icon = "/usr/local/share/gooeyde/assets/volume_high.png";
         }
         GooeyImage_SetImage(volume_status_icon, volume_icon);
     }
@@ -1302,23 +1309,23 @@ void update_status_icons()
         const char *battery_icon;
         if (battery_level >= 90)
         {
-            battery_icon = "assets/battery_full.png";
+            battery_icon = "/usr/local/share/gooeyde/assets/battery_full.png";
         }
         else if (battery_level >= 60)
         {
-            battery_icon = "assets/battery_high.png";
+            battery_icon = "/usr/local/share/gooeyde/assets/battery_high.png";
         }
         else if (battery_level >= 30)
         {
-            battery_icon = "assets/battery_medium.png";
+            battery_icon = "/usr/local/share/gooeyde/assets/battery_medium.png";
         }
         else if (battery_level >= 10)
         {
-            battery_icon = "assets/battery_low.png";
+            battery_icon = "/usr/local/share/gooeyde/assets/battery_low.png";
         }
         else
         {
-            battery_icon = "assets/battery_critical.png";
+            battery_icon = "/usr/local/share/gooeyde/assets/battery_critical.png";
         }
         GooeyImage_SetImage(battery_status_icon, battery_icon);
 
@@ -1334,7 +1341,7 @@ void run_app_menu()
 {
     if (fork() == 0)
     {
-        execl("./gooeyde_appmenu", "./gooeyde_appmenu", NULL);
+        execl("/usr/local/bin/gooeyde_appmenu", "/usr/local/bin/gooeyde_appmenu", NULL);
         perror("Failed to launch app menu");
         exit(1);
     }
@@ -1344,7 +1351,7 @@ void run_systemsettings()
 {
     if (fork() == 0)
     {
-        execl("./gooeyde_systemsettings", "./gooeyde_systemsettings", NULL);
+        execl("/usr/local/bin/gooeyde_systemsettings", "/usr/local/bin/gooeyde_systemsettings", NULL);
         perror("Failed to launch system settings");
         exit(1);
     }
@@ -1427,10 +1434,11 @@ void create_control_panel()
     int panel_x = screen_info.width - panel_width - 10;
     int panel_y = 60;
 
-    control_panel_bg = GooeyImage_Create("assets/control_panel_bg.png", panel_x, panel_y, panel_width, panel_height, desktop_clicked, NULL);
+    control_panel_bg = GooeyImage_Create("/usr/local/share/gooeyde/assets/control_panel_bg.png", panel_x, panel_y, panel_width, panel_height, desktop_clicked, NULL);
 
     panel_title = GooeyLabel_Create("Control Panel", 0.45f, panel_x + 20, panel_y + 45);
     GooeyLabel_SetColor(panel_title, 0xFFFFFF);
+    logout_button = GooeyButton_Create("Logout", panel_x + panel_width - 110, panel_y + 20, 90, 30, logout_callback, NULL);
 
     int current_y = panel_y + 90;
     int label_x = panel_x + 20;
@@ -1509,7 +1517,7 @@ void create_control_panel()
     GooeyWindow_RegisterWidget(win, bluetooth_switch);
     GooeyWindow_RegisterWidget(win, airplane_label);
     GooeyWindow_RegisterWidget(win, airplane_switch);
-
+    GooeyWindow_RegisterWidget(win, logout_button);
     GooeyWindow_RegisterWidget(win, settings_title);
     GooeyWindow_RegisterWidget(win, volume_label);
     GooeyWindow_RegisterWidget(win, volume_slider);
@@ -1535,7 +1543,7 @@ void set_control_panel_visibility(int visible)
         return;
 
     glps_thread_mutex_lock(&ui_update_mutex);
-
+    GooeyWidget_MakeVisible(logout_button, visible);
     GooeyWidget_MakeVisible(control_panel_bg, visible);
     GooeyWidget_MakeVisible(panel_title, visible);
     GooeyWidget_MakeVisible(wifi_label, visible);
@@ -1709,13 +1717,13 @@ void create_status_icons()
     int icon_y = 13;
     int start_x = screen_info.width - 400;
 
-    wifi_status_icon = GooeyImage_Create("assets/wifi_on.png", start_x, icon_y, icon_size, icon_size, NULL, NULL);
+    wifi_status_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/wifi_on.png", start_x, icon_y, icon_size, icon_size, NULL, NULL);
 
-    bluetooth_status_icon = GooeyImage_Create("assets/bluetooth_on.png", start_x + 40, icon_y, icon_size, icon_size, NULL, NULL);
+    bluetooth_status_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/bluetooth_on.png", start_x + 40, icon_y, icon_size, icon_size, NULL, NULL);
 
-    volume_status_icon = GooeyImage_Create("assets/volume_high.png", start_x + 80, icon_y, icon_size, icon_size, mute_audio_callback, NULL);
+    volume_status_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/volume_high.png", start_x + 80, icon_y, icon_size, icon_size, mute_audio_callback, NULL);
 
-    battery_status_icon = GooeyImage_Create("assets/battery_full.png", start_x + 120, icon_y, icon_size, icon_size, NULL, NULL);
+    battery_status_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/battery_full.png", start_x + 120, icon_y, icon_size, icon_size, NULL, NULL);
     battery_percent_label = GooeyLabel_Create("85%", 0.26f, start_x + 148, icon_y + 5);
     GooeyLabel_SetColor(battery_percent_label, 0xFFFFFF);
 
@@ -1745,13 +1753,13 @@ int main(int argc, char **argv)
 
     win = GooeyWindow_Create("Gooey Desktop", screen_info.width, screen_info.height, true);
 
-    wallpaper = GooeyImage_Create("assets/bg.png", 0, 50, screen_info.width, screen_info.height - 50, NULL, NULL);
+    wallpaper = GooeyImage_Create("/usr/local/share/gooeyde/assets/bg.png", 0, 50, screen_info.width, screen_info.height - 50, NULL, NULL);
     GooeyCanvas *canvas = GooeyCanvas_Create(0, 0, screen_info.width, 50, NULL, NULL);
     GooeyCanvas_DrawRectangle(canvas, 0, 0, screen_info.width, 50, 0x222222, true, 1.0f, true, 1.0f);
     GooeyCanvas_DrawLine(canvas, 50, 0, 50, 50, 0xFFFFFF);
 
-    GooeyImage *apps_icon = GooeyImage_Create("assets/apps.png", 10, 10, 30, 30, run_app_menu, NULL);
-    GooeyImage *settings_icon = GooeyImage_Create("assets/settings.png", screen_info.width - 210, 10, 30, 30, toggle_control_panel, NULL);
+    GooeyImage *apps_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/apps.png", 10, 10, 30, 30, run_app_menu, NULL);
+    GooeyImage *settings_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/settings.png", screen_info.width - 210, 10, 30, 30, toggle_control_panel, NULL);
     time_label = GooeyLabel_Create("Loading...", 0.3f, screen_info.width - 150, 18);
     GooeyLabel_SetColor(time_label, 0xFFFFFF);
     date_label = GooeyLabel_Create("Loading...", 0.25f, screen_info.width - 150, 35);
@@ -1811,14 +1819,14 @@ int main(int argc, char **argv)
     if (dock_y < 0)
         dock_y = 0;
 
-    dock_bg = GooeyImage_Create("assets/dock.png", dock_x, dock_y, dock_width, dock_height, NULL, NULL);
+    dock_bg = GooeyImage_Create("/usr/local/share/gooeyde/assets/dock.png", dock_x, dock_y, dock_width, dock_height, NULL, NULL);
     GooeyWindow_RegisterWidget(win, dock_bg);
 
     printf("Desktop started successfully\n");
     printf("Screen resolution: %dx%d\n", screen_info.width, screen_info.height);
     printf("Click the settings icon to toggle control panel visibility\n");
     printf("Open apps will appear in the dock at the bottom\n");
-    //open_wallpaper_settings();
+    // open_wallpaper_settings();
     GooeyWindow_Run(1, win);
 
     printf("Stopping threads...\n");

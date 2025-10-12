@@ -1,0 +1,30 @@
+#!/bin/bash
+LOGFILE="$HOME/.local/share/gooey_shell.log"
+mkdir -p "$(dirname "$LOGFILE")"
+exec > >(tee -a "$LOGFILE") 2>&1
+
+echo "=== Starting Gooey Shell session at $(date) ==="
+echo "DISPLAY=$DISPLAY"
+echo "XDG_SESSION_TYPE=$XDG_SESSION_TYPE"
+echo "XDG_CURRENT_DESKTOP=$XDG_CURRENT_DESKTOP"
+
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=gooey_shell
+export GDK_BACKEND=x11
+export DISPLAY=${DISPLAY:-:0}
+export XDG_SESSION_DESKTOP=gooey_shell
+export XDG_DATA_DIRS=/usr/local/share/assets:/usr/share/xdg:/usr/local/share:/usr/share
+
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+  echo "Starting DBus..."
+  eval "$(dbus-launch --sh-syntax)"
+fi
+
+cd /usr/local/bin || exit 1
+
+echo "Launching gooey_shell..."
+/usr/local/bin/gooey_shell
+RET=$?
+
+echo "gooey_shell exited with code $RET at $(date)"
+exit $RET

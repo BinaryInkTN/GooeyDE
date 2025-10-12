@@ -24,7 +24,7 @@ int main()
     {
 
         setenv("GOOEY_DESKTOP_APP", "1", 1);
-        execl("./gooeyde_desktop", "./gooeyde_desktop", NULL);
+        execl("/usr/local/bin/gooeyde_desktop", "/usr/local/bin/gooeyde_desktop", NULL);
         perror("Failed to launch taskbar");
         exit(1);
     }
