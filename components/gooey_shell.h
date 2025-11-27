@@ -2,25 +2,98 @@
 #define GOOEY_SHELL_H
 
 #include <X11/Xlib.h>
-#include <dbus-1.0/dbus/dbus.h>
-#include <stdbool.h>
+#include <X11/Xatom.h>
+#include <dbus/dbus.h>
+#include <GLPS/glps_thread.h>
 
 #define WINDOW_MANAGER_NAME "GooeyShell"
-#define TITLE_BAR_HEIGHT 24
+#define DEFAULT_WIDTH 800
+#define DEFAULT_HEIGHT 600
+#define TITLE_BAR_HEIGHT 30
 #define BORDER_WIDTH 2
 #define BUTTON_SIZE 12
 #define BUTTON_MARGIN 6
-#define BUTTON_SPACING 4
-#define RESIZE_HANDLE_SIZE 8
-#define MIN_WINDOW_WIDTH 100
-#define MIN_WINDOW_HEIGHT 80
-#define DEFAULT_WIDTH 400
-#define DEFAULT_HEIGHT 300
+#define BUTTON_SPACING 8
+#define RESIZE_HANDLE_SIZE 6
 
-typedef struct WindowNode WindowNode;
-typedef struct GooeyShellState GooeyShellState;
-typedef struct
-{
+typedef enum {
+    LAYOUT_TILING,
+    LAYOUT_MONOCLE,
+    LAYOUT_FLOATING
+} LayoutMode;
+
+typedef enum {
+    SPLIT_HORIZONTAL,
+    SPLIT_VERTICAL,
+    SPLIT_NONE
+} SplitDirection;
+
+typedef struct {
+    int x, y;
+    int width, height;
+    int number;
+} Monitor;
+
+typedef struct {
+    Monitor *monitors;
+    int num_monitors;
+    int primary_monitor;
+} MonitorInfo;
+
+typedef struct WindowNode {
+    Window frame;
+    Window client;
+    char *title;
+    int x, y;
+    int width, height;
+    int monitor_number;
+    int is_minimized;
+    int is_fullscreen;
+    int is_floating;
+    int is_tiled;
+    int is_titlebar_disabled;
+    int is_desktop_app;
+    int is_fullscreen_app;
+    int stay_on_top;
+    int workspace;
+    int stack_index;
+    
+    int tiling_x;
+    int tiling_y;
+    int tiling_width;
+    int tiling_height;
+    int floating_x;
+    int floating_y;
+    int floating_width;
+    int floating_height;
+    
+    struct WindowNode *next;
+    struct WindowNode *prev;
+} WindowNode;
+
+typedef struct TilingNode {
+    WindowNode *window;
+    struct TilingNode *left;
+    struct TilingNode *right;
+    struct TilingNode *parent;
+    int x, y, width, height;
+    float ratio;
+    SplitDirection split;
+    int is_leaf;
+} TilingNode;
+
+typedef struct Workspace {
+    int number;
+    LayoutMode layout;
+    float master_ratio;
+    float *stack_ratios;
+    int stack_ratios_count;
+    WindowNode *windows;
+    TilingNode *tiling_root;
+    struct Workspace *next;
+} Workspace;
+
+typedef struct {
     Atom net_wm_name;
     Atom utf8_string;
     Atom wm_protocols;
@@ -44,40 +117,7 @@ typedef struct
     Atom gooey_desktop_app;
 } PrecomputedAtoms;
 
-typedef struct
-{
-    int x, y;
-    int width, height;
-    int number;
-} Monitor;
-
-typedef struct
-{
-    Monitor *monitors;
-    int num_monitors;
-    int primary_monitor;
-} MonitorInfo;
-struct WindowNode
-{
-    Window frame;
-    Window client;
-    int x, y;
-    int width, height;
-    char *title;
-    Bool mapped;
-    Bool is_fullscreen;
-    Bool is_titlebar_disabled;
-    Bool is_desktop_app;
-    Bool is_fullscreen_app;
-    Bool is_minimized;
-    Bool stay_on_top;
-    int monitor_number;
-
-    WindowNode *next;
-};
-
-struct GooeyShellState
-{
+typedef struct {
     Display *display;
     int screen;
     Window root;
@@ -85,50 +125,75 @@ struct GooeyShellState
     GC titlebar_gc;
     GC text_gc;
     GC button_gc;
-    Cursor move_cursor;
-    Cursor resize_cursor;
-    Cursor normal_cursor;
-    Cursor custom_cursor;
-    WindowNode *window_list;
-    Window focused_window;
-    unsigned long bg_color;
+
     unsigned long titlebar_color;
     unsigned long titlebar_focused_color;
-    unsigned long border_color;
     unsigned long text_color;
+    unsigned long border_color;
     unsigned long button_color;
     unsigned long close_button_color;
     unsigned long minimize_button_color;
     unsigned long maximize_button_color;
+    unsigned long bg_color;
 
-    Bool is_dragging;
-    Bool is_resizing;
-    Window drag_window;
-    int drag_start_x;
-    int drag_start_y;
-    int window_start_x;
-    int window_start_y;
-    int window_start_width;
-    int window_start_height;
-    MonitorInfo monitor_info;
+    Cursor move_cursor;
+    Cursor resize_cursor;
+    Cursor v_resize_cursor;
+    Cursor normal_cursor;
+    Cursor custom_cursor;
 
+    WindowNode *window_list;
+    Window focused_window;
     Window desktop_app_window;
     Window fullscreen_app_window;
 
-    bool is_dbus_init;
-    // DBUS Connection
+    MonitorInfo monitor_info;
+
+    Workspace *workspaces;
+    int current_workspace;
+    LayoutMode current_layout;
+
+    Window drag_window;
+    int is_dragging;
+    int is_resizing;
+    int is_tiling_resizing;
+    int drag_start_x, drag_start_y;
+    int original_x, original_y;
+    int original_width, original_height;
+    int resize_direction;
+    int tiling_resize_edge;
+
+    unsigned int mod_key;
+    int super_pressed;
+
+    int inner_gap;
+    int outer_gap;
+
     DBusConnection *dbus_connection;
-    struct DBusError dbus_error;
-};
+    DBusError dbus_error;
+    int is_dbus_init;
+
+    PrecomputedAtoms atoms;
+} GooeyShellState;
 
 GooeyShellState *GooeyShell_Init(void);
 void GooeyShell_RunEventLoop(GooeyShellState *state);
-void GooeyShell_AddFullscreenApp(GooeyShellState *state, const char *command, int stay_on_top);
+void GooeyShell_Cleanup(GooeyShellState *state);
 void GooeyShell_AddWindow(GooeyShellState *state, const char *command, int desktop_app);
+void GooeyShell_AddFullscreenApp(GooeyShellState *state, const char *command, int stay_on_top);
 void GooeyShell_MarkAsDesktopApp(GooeyShellState *state, Window client);
+void GooeyShell_ToggleFloating(GooeyShellState *state, Window client);
+void GooeyShell_TileWindows(GooeyShellState *state);
+void GooeyShell_FocusNextWindow(GooeyShellState *state);
+void GooeyShell_FocusPreviousWindow(GooeyShellState *state);
+void GooeyShell_MoveWindowToWorkspace(GooeyShellState *state, Window client, int workspace);
+void GooeyShell_SwitchWorkspace(GooeyShellState *state, int workspace);
+void GooeyShell_SetLayout(GooeyShellState *state, LayoutMode layout);
 void GooeyShell_ToggleTitlebar(GooeyShellState *state, Window client);
 void GooeyShell_SetTitlebarEnabled(GooeyShellState *state, Window client, int enabled);
 int GooeyShell_IsTitlebarEnabled(GooeyShellState *state, Window client);
-void GooeyShell_Cleanup(GooeyShellState *state);
+Window *GooeyShell_GetOpenedWindows(GooeyShellState *state, int *count);
+int GooeyShell_IsWindowOpened(GooeyShellState *state, Window window);
+int GooeyShell_IsWindowMinimized(GooeyShellState *state, Window client);
 
 #endif

@@ -18,6 +18,7 @@ include_directories(
     ${XCURSOR_INCLUDE_DIRS}
     ${XRANDR_INCLUDE_DIRS}
     /usr/local/include/GLPS
+     /usr/local/include/Gooey
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/components
 )

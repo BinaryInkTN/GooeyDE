@@ -11,6 +11,8 @@
         "stdarg.h": "c",
         "type_traits": "cpp",
         "time.h": "c",
-        "devices_helper.h": "c"
+        "devices_helper.h": "c",
+        "chrono": "c",
+        "functional": "c"
     }
 }

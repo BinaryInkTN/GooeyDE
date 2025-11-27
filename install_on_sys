@@ -11,7 +11,7 @@ INSTALL_PREFIX="/usr/local"
 BIN_DIR="$INSTALL_PREFIX/bin"
 SHARE_DIR="$INSTALL_PREFIX/share/gooeyde"
 SESSION_DIR="/usr/share/xsessions"
-LOGFILE="$HOME/.local/share/gooeyde-session.log"
+LOGFILE="$HOME.local/share/gooeyde-session.log"
 
 # Colors
 GREEN="\033[1;32m"
