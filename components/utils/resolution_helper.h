@@ -14,60 +14,69 @@ typedef struct
     Display *display;
 } ScreenInfo;
 
-static ScreenInfo get_screen_resolution()
-{
-    ScreenInfo info = {0};
-    info.display = XOpenDisplay(NULL);
-    if (!info.display)
-    {
-        fprintf(stderr, "Unable to open X display\n");
-        return info;
-    }
-
-    info.screen = DefaultScreen(info.display);
-
-    int event_base, error_base;
-    if (XRRQueryExtension(info.display, &event_base, &error_base))
-    {
-        XRRScreenResources *resources = XRRGetScreenResources(info.display, RootWindow(info.display, info.screen));
-        if (resources)
-        {
-
-            for (int i = 0; i < resources->noutput; i++)
-            {
-                XRROutputInfo *output_info = XRRGetOutputInfo(info.display, resources, resources->outputs[i]);
-                if (output_info && output_info->connection == RR_Connected && output_info->crtc)
-                {
-                    XRRCrtcInfo *crtc_info = XRRGetCrtcInfo(info.display, resources, output_info->crtc);
-                    if (crtc_info && crtc_info->width > 0 && crtc_info->height > 0)
-                    {
-
-                        info.width = crtc_info->width;
-                        info.height = crtc_info->height;
-                        if (crtc_info)
-                            XRRFreeCrtcInfo(crtc_info);
-                        if (output_info)
-                            XRRFreeOutputInfo(output_info);
-                        break;
+  ScreenInfo get_screen_resolution(void) {
+    ScreenInfo info = {1920, 1080}; // Default fallback
+    
+    FILE *fp = popen("xrandr 2>/dev/null | grep ' connected primary'", "r");
+    if (fp) {
+        char line[256];
+        if (fgets(line, sizeof(line), fp)) {
+            // Parse resolution from xrandr output
+            char *res_start = strstr(line, " connected primary ");
+            if (res_start) {
+                res_start += 19; // Move past " connected primary "
+                char *res_end = strchr(res_start, ' ');
+                if (res_end) {
+                    char resolution[32];
+                    size_t len = res_end - res_start;
+                    if (len < sizeof(resolution)) {
+                        strncpy(resolution, res_start, len);
+                        resolution[len] = '\0';
+                        
+                        // Parse width and height
+                        if (sscanf(resolution, "%dx%d", &info.width, &info.height) == 2) {
+                            pclose(fp);
+                            return info;
+                        }
                     }
-                    if (crtc_info)
-                        XRRFreeCrtcInfo(crtc_info);
                 }
-                if (output_info)
-                    XRRFreeOutputInfo(output_info);
             }
-            XRRFreeScreenResources(resources);
         }
+        pclose(fp);
     }
-
-    if (info.width == 0 || info.height == 0)
-    {
-        info.width = DisplayWidth(info.display, info.screen);
-        info.height = DisplayHeight(info.display, info.screen);
+    
+    // Fallback: try any connected display
+    fp = popen("xrandr 2>/dev/null | grep ' connected' | head -1", "r");
+    if (fp) {
+        char line[256];
+        if (fgets(line, sizeof(line), fp)) {
+            // Look for resolution pattern
+            char *res_start = strstr(line, " connected ");
+            if (res_start) {
+                res_start += 11;
+                char *res_end = strchr(res_start, ' ');
+                if (res_end) {
+                    char resolution[32];
+                    size_t len = res_end - res_start;
+                    if (len < sizeof(resolution)) {
+                        strncpy(resolution, res_start, len);
+                        resolution[len] = '\0';
+                        
+                        // Parse width and height
+                        if (sscanf(resolution, "%dx%d", &info.width, &info.height) == 2) {
+                            pclose(fp);
+                            return info;
+                        }
+                    }
+                }
+            }
+        }
+        pclose(fp);
     }
-
+    
     return info;
 }
+
 
 static void cleanup_screen_info(ScreenInfo *info)
 {

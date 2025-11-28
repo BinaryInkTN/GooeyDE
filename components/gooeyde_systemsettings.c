@@ -1,14 +1,3 @@
-/**
- * @file gooey_settings.c
- * @brief System settings application using the Gooey UI library.
- *
- * Provides a graphical interface for managing Wi-Fi, Bluetooth, audio,
- * processes, and storage settings on a Linux system.
- *
- * @author Yassine Ahmed Ali
- * @license GPL-3.0
- */
-
 #include <Gooey/gooey.h>
 #include "utils/resolution_helper.h"
 #include <stdio.h>
@@ -46,6 +35,19 @@ GooeyButton *refresh_processes_btn = NULL;
 
 GooeyList *storage_list = NULL;
 GooeyButton *refresh_storage_btn = NULL;
+
+GooeyLabel *host_value = NULL;
+GooeyLabel *user_value = NULL;
+GooeyLabel *os_value = NULL;
+GooeyLabel *cpu_value = NULL;
+GooeyLabel *ram_value = NULL;
+GooeyLabel *kernel_value = NULL;
+GooeyCanvas *system_header = NULL;
+GooeyCanvas *wifi_header = NULL;
+GooeyCanvas *bluetooth_header = NULL;
+GooeyCanvas *audio_header = NULL;
+GooeyCanvas *process_header = NULL;
+GooeyCanvas *storage_header = NULL;
 
 #define MAX_WIFI_NETWORKS 128
 #define MAX_BT_DEVICES 128
@@ -91,6 +93,59 @@ static bool is_muted = false;
 static int current_volume = 50;
 static gthread_mutex_t audio_mutex;
 
+static int window_width = 0;
+static int window_height = 0;
+
+static void cleanup_resources(void)
+{
+    printf("Cleaning up resources...\n");
+
+    glps_thread_mutex_destroy(&wifi_mutex);
+    glps_thread_mutex_destroy(&bt_mutex);
+    glps_thread_mutex_destroy(&process_mutex);
+    glps_thread_mutex_destroy(&audio_mutex);
+
+    if (win) {
+        GooeyWindow_Cleanup(1, win);
+        win = NULL;
+    }
+
+    settings_tabs = NULL;
+    wifi_switch = NULL;
+    bluetooth_switch = NULL;
+    wifi_list = NULL;
+    bluetooth_list = NULL;
+    refresh_wifi_btn = NULL;
+    refresh_bluetooth_btn = NULL;
+    disconnect_wifi_btn = NULL;
+    wifi_status_label = NULL;
+    bt_status_label = NULL;
+    brightness_slider = NULL;
+    master_volume_slider = NULL;
+    mute_switch = NULL;
+    audio_devices_dropdown = NULL;
+    refresh_audio_btn = NULL;
+    process_list = NULL;
+    kill_process_btn = NULL;
+    refresh_processes_btn = NULL;
+    storage_list = NULL;
+    refresh_storage_btn = NULL;
+    host_value = NULL;
+    user_value = NULL;
+    os_value = NULL;
+    cpu_value = NULL;
+    ram_value = NULL;
+    kernel_value = NULL;
+    system_header = NULL;
+    wifi_header = NULL;
+    bluetooth_header = NULL;
+    audio_header = NULL;
+    process_header = NULL;
+    storage_header = NULL;
+
+    printf("Cleanup completed.\n");
+}
+
 static void safe_string_copy(char *dest, const char *src, size_t dest_size)
 {
     if (dest && src && dest_size > 0)
@@ -118,9 +173,6 @@ static void trim_whitespace(char *str)
         memmove(str, start, strlen(start) + 1);
 }
 
-/**
- * @brief Extracts a short name from audio device description.
- */
 static void extract_audio_device_name(const char *long_name, char *short_name, size_t size)
 {
     if (!long_name || !short_name || size == 0)
@@ -220,9 +272,6 @@ static void update_wifi_status()
     GooeyLabel_SetText(wifi_status_label, status_text);
 }
 
-/**
- * @brief Scans for available Wi-Fi networks in a separate thread.
- */
 static void *wifi_scan_thread(void *arg)
 {
     glps_thread_mutex_lock(&wifi_mutex);
@@ -431,9 +480,6 @@ static void disconnect_wifi_callback(void *user_data)
     }
 }
 
-/**
- * @brief Toggles Wi-Fi power state.
- */
 static void *wifi_toggle_thread(void *arg)
 {
     bool enabled = *(bool *)arg;
@@ -642,9 +688,6 @@ static void refresh_bluetooth_list()
     }
 }
 
-/**
- * @brief Connects to a Bluetooth device in a separate thread.
- */
 static void *connect_to_bluetooth_thread(void *arg)
 {
     char *address = (char *)arg;
@@ -1113,11 +1156,11 @@ static void create_system_ui()
         safe_string_copy(hostname, "Unknown", sizeof(hostname));
     }
     GooeyLabel *host_label = GooeyLabel_Create("Hostname:", 24.0f, 50, y_ref + 60);
-    GooeyLabel *host_value = GooeyLabel_Create(hostname, 24.0f, 200, y_ref + 60);
+    host_value = GooeyLabel_Create(hostname, 24.0f, 200, y_ref + 60);
 
     char *username = getenv("USER");
     GooeyLabel *user_label = GooeyLabel_Create("Username:", 24.0f, 50, y_ref + 100);
-    GooeyLabel *user_value = GooeyLabel_Create(username ? username : "Unknown", 24.0f, 200, y_ref + 100);
+    user_value = GooeyLabel_Create(username ? username : "Unknown", 24.0f, 200, y_ref + 100);
 
     char os_name[256] = "Unknown";
     FILE *fp = fopen("/etc/os-release", "r");
@@ -1145,7 +1188,7 @@ static void create_system_ui()
         fclose(fp);
     }
     GooeyLabel *os_label = GooeyLabel_Create("OS:", 24.0f, 50, y_ref + 140);
-    GooeyLabel *os_value = GooeyLabel_Create(os_name, 24.0f, 200, y_ref + 140);
+    os_value = GooeyLabel_Create(os_name, 24.0f, 200, y_ref + 140);
 
     char cpu_model[256] = "Unknown";
     fp = fopen("/proc/cpuinfo", "r");
@@ -1168,7 +1211,7 @@ static void create_system_ui()
         fclose(fp);
     }
     GooeyLabel *cpu_label = GooeyLabel_Create("CPU:", 24.0f, 50, y_ref + 180);
-    GooeyLabel *cpu_value = GooeyLabel_Create(cpu_model, 24.0f, 200, y_ref + 180);
+    cpu_value = GooeyLabel_Create(cpu_model, 24.0f, 200, y_ref + 180);
 
     char ram_info[64] = "Unknown";
     fp = fopen("/proc/meminfo", "r");
@@ -1193,7 +1236,7 @@ static void create_system_ui()
         fclose(fp);
     }
     GooeyLabel *ram_label = GooeyLabel_Create("RAM:", 24.0f, 50, y_ref + 220);
-    GooeyLabel *ram_value = GooeyLabel_Create(ram_info, 24.0f, 200, y_ref + 220);
+    ram_value = GooeyLabel_Create(ram_info, 24.0f, 200, y_ref + 220);
 
     char kernel_version[128] = "Unknown";
     fp = popen("uname -r 2>/dev/null", "r");
@@ -1206,7 +1249,7 @@ static void create_system_ui()
         pclose(fp);
     }
     GooeyLabel *kernel_label = GooeyLabel_Create("Kernel:", 24.0f, 50, y_ref + 260);
-    GooeyLabel *kernel_value = GooeyLabel_Create(kernel_version, 24.0f, 200, y_ref + 260);
+    kernel_value = GooeyLabel_Create(kernel_version, 24.0f, 200, y_ref + 260);
 
     GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)gooeyde_logo);
     GooeyTabs_AddWidget(win, settings_tabs, 0, (GooeyWidget *)host_label);
@@ -1230,21 +1273,21 @@ static void create_audio_ui()
 
     int y_ref = 130;
 
-    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 80, NULL, NULL);
-    GooeyCanvas_DrawRectangle(header, 0, 0, 800, 80, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
+    audio_header = GooeyCanvas_Create(0, 0, window_width, 80, NULL, NULL);
+    GooeyCanvas_DrawRectangle(audio_header, 0, 0, window_width, 80, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
     GooeyLabel *section_title = GooeyLabel_Create("Settings/Audio", 24.0f, 50, 70);
     GooeyLabel *master_label = GooeyLabel_Create("Master Volume:", 18.0f, 50, y_ref + 10);
-    master_volume_slider = GooeySlider_Create(300, y_ref, 200, 50, 100, false, master_volume_callback, NULL);
+    master_volume_slider = GooeySlider_Create(300, y_ref, window_width - 400, 50, 100, false, master_volume_callback, NULL);
 
     GooeyLabel *mute_label = GooeyLabel_Create("Mute:", 18.0f, 50, y_ref + 70);
     mute_switch = GooeySwitch_Create(150, y_ref + 45, is_muted, 0, mute_switch_callback, NULL);
 
     GooeyLabel *device_label = GooeyLabel_Create("Audio Device:", 18.0f, 50, y_ref + 140);
-    audio_devices_dropdown = GooeyDropdown_Create(210, y_ref + 115, 280, 40, NULL, 0, audio_device_selection_callback, NULL);
+    audio_devices_dropdown = GooeyDropdown_Create(210, y_ref + 115, window_width - 450, 40, NULL, 0, audio_device_selection_callback, NULL);
 
-    refresh_audio_btn = GooeyButton_Create("Refresh Devices", 510, y_ref + 115, 150, 40, refresh_audio_callback, NULL);
+    refresh_audio_btn = GooeyButton_Create("Refresh Devices", window_width - 220, y_ref + 115, 80, 40, refresh_audio_callback, NULL);
     GooeyTabs_AddWidget(win, settings_tabs, 3, (GooeyWidget *)section_title);
-    GooeyTabs_AddWidget(win, settings_tabs, 3, (GooeyWidget *)header);
+    GooeyTabs_AddWidget(win, settings_tabs, 3, (GooeyWidget *)audio_header);
     GooeyTabs_AddWidget(win, settings_tabs, 3, (GooeyWidget *)master_label);
     GooeyTabs_AddWidget(win, settings_tabs, 3, (GooeyWidget *)master_volume_slider);
     GooeyTabs_AddWidget(win, settings_tabs, 3, (GooeyWidget *)mute_label);
@@ -1263,18 +1306,18 @@ static void create_process_ui()
 
     int y_ref = 50;
 
-    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 80, NULL, NULL);
-    GooeyCanvas_DrawRectangle(header, 0, 0, 800, 80, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
+    process_header = GooeyCanvas_Create(0, 0, window_width, 80, NULL, NULL);
+    GooeyCanvas_DrawRectangle(process_header, 0, 0, window_width, 80, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
     GooeyLabel *section_title = GooeyLabel_Create("Settings/Processes", 24.0f, 50, 70);
 
-    refresh_processes_btn = GooeyButton_Create("Refresh", 400, y_ref - 25, 100, 40, refresh_processes_callback, NULL);
-    kill_process_btn = GooeyButton_Create("Kill Process", 510, y_ref - 25, 120, 40, kill_process_callback, NULL);
+    refresh_processes_btn = GooeyButton_Create("Refresh", window_width - 210, y_ref - 25, 100, 40, refresh_processes_callback, NULL);
+    kill_process_btn = GooeyButton_Create("Kill Process", window_width - 340, y_ref - 25, 120, 40, kill_process_callback, NULL);
     if (kill_process_btn)
         GooeyWidget_MakeVisible(kill_process_btn, false);
 
-    process_list = GooeyList_Create(0, y_ref + 30, 650, 520, process_selection_callback, NULL);
+    process_list = GooeyList_Create(0, y_ref + 30, window_width - 50, window_height - 150, process_selection_callback, NULL);
 
-    GooeyTabs_AddWidget(win, settings_tabs, 4, (GooeyWidget *)header);
+    GooeyTabs_AddWidget(win, settings_tabs, 4, (GooeyWidget *)process_header);
     GooeyTabs_AddWidget(win, settings_tabs, 4, (GooeyWidget *)section_title);
     GooeyTabs_AddWidget(win, settings_tabs, 4, (GooeyWidget *)refresh_processes_btn);
     GooeyTabs_AddWidget(win, settings_tabs, 4, (GooeyWidget *)kill_process_btn);
@@ -1290,15 +1333,15 @@ static void create_storage_ui()
 
     int y_ref = 50;
 
-    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 80, NULL, NULL);
-    GooeyCanvas_DrawRectangle(header, 0, 0, 800, 80, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
+    storage_header = GooeyCanvas_Create(0, 0, window_width, 80, NULL, NULL);
+    GooeyCanvas_DrawRectangle(storage_header, 0, 0, window_width, 80, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
     GooeyLabel *section_title = GooeyLabel_Create("Settings/Storage",24.0f, 50, 70);
 
-    refresh_storage_btn = GooeyButton_Create("Refresh", 530, y_ref - 30, 100, 40, refresh_storage_callback, NULL);
+    refresh_storage_btn = GooeyButton_Create("Refresh", window_width - 160, y_ref - 30, 100, 40, refresh_storage_callback, NULL);
 
-    storage_list = GooeyList_Create(0, y_ref + 30, 650, 520, NULL, NULL);
+    storage_list = GooeyList_Create(0, y_ref + 30, window_width - 50, window_height - 150, NULL, NULL);
 
-    GooeyTabs_AddWidget(win, settings_tabs, 5, (GooeyWidget *)header);
+    GooeyTabs_AddWidget(win, settings_tabs, 5, (GooeyWidget *)storage_header);
     GooeyTabs_AddWidget(win, settings_tabs, 5, (GooeyWidget *)section_title);
     GooeyTabs_AddWidget(win, settings_tabs, 5, (GooeyWidget *)refresh_storage_btn);
     GooeyTabs_AddWidget(win, settings_tabs, 5, (GooeyWidget *)storage_list);
@@ -1312,20 +1355,20 @@ static void create_network_ui()
         return;
 
     int y_ref = 50;
-    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 90, NULL, NULL);
-    GooeyCanvas_DrawRectangle(header, 0, 0, 800, 90, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
+    wifi_header = GooeyCanvas_Create(0, 0, window_width, 90, NULL, NULL);
+    GooeyCanvas_DrawRectangle(wifi_header, 0, 0, window_width, 90, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
     GooeyLabel *section_title = GooeyLabel_Create("Settings/Wi-Fi", 24.0f, 50, 70);
     is_wifi_enabled = get_wifi_enabled();
     wifi_switch = GooeySwitch_Create(200, y_ref - 25, is_wifi_enabled, 0, wifi_switch_callback, NULL);
 
-    refresh_wifi_btn = GooeyButton_Create("Refresh", 590, y_ref - 10, 100, 40, refresh_button_callback, NULL);
-    disconnect_wifi_btn = GooeyButton_Create("Disconnect", 680, y_ref - 10, 120, 40, disconnect_wifi_callback, NULL);
+    refresh_wifi_btn = GooeyButton_Create("Refresh", window_width - 160, y_ref - 10, 100, 40, refresh_button_callback, NULL);
+    disconnect_wifi_btn = GooeyButton_Create("Disconnect", window_width - 290, y_ref - 10, 120, 40, disconnect_wifi_callback, NULL);
 
-    wifi_status_label = GooeyLabel_Create("Checking status...", 18.0f, 460, y_ref - 20);
+    wifi_status_label = GooeyLabel_Create("Checking status...", 18.0f, window_width - 350, y_ref - 20);
 
-    wifi_list = GooeyList_Create(0, y_ref + 40, 795, 510, connect_to_network_callback, NULL);
+    wifi_list = GooeyList_Create(0, y_ref + 40, window_width - 5, window_height - 150, connect_to_network_callback, NULL);
 
-    GooeyTabs_AddWidget(win, settings_tabs, 1, (GooeyWidget *)header);
+    GooeyTabs_AddWidget(win, settings_tabs, 1, (GooeyWidget *)wifi_header);
     GooeyTabs_AddWidget(win, settings_tabs, 1, (GooeyWidget *)section_title);
     GooeyTabs_AddWidget(win, settings_tabs, 1, (GooeyWidget *)wifi_switch);
     GooeyTabs_AddWidget(win, settings_tabs, 1, (GooeyWidget *)refresh_wifi_btn);
@@ -1361,20 +1404,20 @@ static void create_bluetooth_ui()
         return;
 
     int y_ref = 50;
-    GooeyCanvas *header = GooeyCanvas_Create(0, 0, 800, 90, NULL, NULL);
-    GooeyCanvas_DrawRectangle(header, 0, 0, 800, 90, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
+    bluetooth_header = GooeyCanvas_Create(0, 0, window_width, 90, NULL, NULL);
+    GooeyCanvas_DrawRectangle(bluetooth_header, 0, 0, window_width, 90, win->active_theme->widget_base, true, 0.0f, false, 0.0f);
     GooeyLabel *section_title = GooeyLabel_Create("Settings/Bluetooth", 24.0f, 50, 70);
 
     is_bt_enabled = get_bluetooth_enabled();
     bluetooth_switch = GooeySwitch_Create(250, y_ref - 25, is_bt_enabled, 0, bluetooth_switch_callback, NULL);
 
-    refresh_bluetooth_btn = GooeyButton_Create("Scan for devices...", 490, y_ref - 10, 100, 40, refresh_bluetooth_button_callback, NULL);
+    refresh_bluetooth_btn = GooeyButton_Create("Scan for devices...", window_width - 210, y_ref - 10, 100, 40, refresh_bluetooth_button_callback, NULL);
 
-    bt_status_label = GooeyLabel_Create("Checking status...", 18.0f, 490, y_ref - 20);
+    bt_status_label = GooeyLabel_Create("Checking status...", 18.0f, window_width - 350, y_ref - 20);
 
-    bluetooth_list = GooeyList_Create(0, y_ref + 35, 650, 515, connect_to_bluetooth_callback, NULL);
+    bluetooth_list = GooeyList_Create(0, y_ref + 35, window_width - 50, window_height - 150, connect_to_bluetooth_callback, NULL);
 
-    GooeyTabs_AddWidget(win, settings_tabs, 2, (GooeyWidget *)header);
+    GooeyTabs_AddWidget(win, settings_tabs, 2, (GooeyWidget *)bluetooth_header);
     GooeyTabs_AddWidget(win, settings_tabs, 2, (GooeyWidget *)section_title);
 
     GooeyTabs_AddWidget(win, settings_tabs, 2, (GooeyWidget *)bluetooth_switch);
@@ -1422,13 +1465,18 @@ int main(int argc, char **argv)
     glps_thread_mutex_init(&process_mutex, NULL);
     glps_thread_mutex_init(&audio_mutex, NULL);
 
-    win = GooeyWindow_Create("Gooey Settings", 800, 600, true);
+    ScreenInfo screen_info = get_screen_resolution();
+    window_width = screen_info.width;
+    window_height = screen_info.height - 50;
+
+    win = GooeyWindow_Create("Gooey Settings", window_width, window_height, true);
     if (!win)
     {
         fprintf(stderr, "Failed to create main window\n");
-        goto cleanup;
+        cleanup_resources();
+        return 1;
     }
-    
+
     GooeyWindow_MakeTransparent(win, 15, 0.9f);
 
     GooeyTheme *dark_theme = GooeyTheme_LoadFromFile("/usr/local/share/gooeyde/assets/dark.json");
@@ -1443,15 +1491,16 @@ int main(int argc, char **argv)
 
     win->vk = NULL;
 
-    settings_tabs = GooeyTabs_Create(0, 0, 800, 600, true);
+    settings_tabs = GooeyTabs_Create(0, 0, window_width, window_height, true);
     if (!settings_tabs)
     {
         fprintf(stderr, "Failed to create tabs\n");
-        GooeyWindow_Cleanup(1, win);
-        goto cleanup;
+        cleanup_resources();
+        return 1;
     }
-	settings_tabs->is_sidebar = 0;
-    //GooeyTabs_Sidebar_Open(settings_tabs);
+
+    settings_tabs->is_sidebar = 0;
+
     GooeyTabs_InsertTab(settings_tabs, "System");
     GooeyTabs_InsertTab(settings_tabs, "Wi-Fi");
     GooeyTabs_InsertTab(settings_tabs, "Bluetooth");
@@ -1470,13 +1519,6 @@ int main(int argc, char **argv)
 
     GooeyWindow_Run(1, win);
 
-cleanup:
-    glps_thread_mutex_destroy(&wifi_mutex);
-    glps_thread_mutex_destroy(&bt_mutex);
-    glps_thread_mutex_destroy(&process_mutex);
-    glps_thread_mutex_destroy(&audio_mutex);
-    if (win)
-        GooeyWindow_Cleanup(1, win);
-
+    cleanup_resources();
     return 0;
 }

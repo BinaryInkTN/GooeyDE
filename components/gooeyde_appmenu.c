@@ -52,7 +52,6 @@ static GooeyImage *app_icons[GRID_COLS * GRID_ROWS];
 static gthread_t app_detect_thread;
 static volatile int apps_loaded = 0;
 
-/* Function declarations */
 static void initialize_application(void);
 static void cleanup_application(void);
 static void detect_system_applications(void);
@@ -72,7 +71,6 @@ static int fuzzy_match(const char *str, const char *pattern);
 static char *find_icon_path(const char *icon_name);
 static void free_filtered_apps(void);
 
-/* Launch callback wrappers with correct signature */
 static void launch_app_callback_0(int x, int y, void* user_data) {
     size_t app_index = current_page * APPS_PER_PAGE + 0;
     AppEntry *apps = use_filtered_apps ? filtered_apps : detected_apps;
@@ -208,7 +206,7 @@ static void free_filtered_apps(void) {
 
 static char *trim_string(char *str) {
     if (!str) return NULL;
-    
+
     char *end;
     while (*str == ' ' || *str == '\t' || *str == '\n') str++;
     if (*str == 0) return str;
@@ -358,7 +356,7 @@ static void detect_system_applications(void) {
         printf("Scanning directory: %s\n", app_directories[i]);
         scan_application_directory(app_directories[i]);
     }
-    
+
     if (home_dir) {
         printf("Scanning directory: %s\n", user_apps_dir);
         scan_application_directory(user_apps_dir);
@@ -503,7 +501,7 @@ static void create_ui(void) {
     const int vertical_margin = 180;
     const int horizontal_spacing = 25;
     const int vertical_spacing = 20;
-    
+
     const int grid_width = (GRID_COLS * app_card_width) + ((GRID_COLS - 1) * horizontal_spacing);
     const int grid_margin_x = (screen_info.width - grid_width) / 2;
     const int grid_margin_y = vertical_margin;
@@ -514,7 +512,6 @@ static void create_ui(void) {
     GooeyContainer_InsertContainer(main_container);
     GooeyContainer_SetActiveContainer(main_container, 0);
 
-    /* Background */
     background = GooeyCanvas_Create(0, 0, screen_info.width, screen_info.height, NULL, NULL);
     if (background) {
         GooeyCanvas_DrawRectangle(background, 0, 0, screen_info.width, screen_info.height,
@@ -522,7 +519,6 @@ static void create_ui(void) {
         GooeyContainer_AddWidget(main_window, main_container, 0, background);
     }
 
-    /* Title */
     title_label = GooeyLabel_Create("Application Launcher", 28.0f,
                                     screen_info.width / 2 - 180, 40);
     if (title_label) {
@@ -530,12 +526,10 @@ static void create_ui(void) {
         GooeyContainer_AddWidget(main_window, main_container, 0, title_label);
     }
 
-    /* Search */
     const int search_width = screen_info.width / 2.5;
     const int search_height = 45;
     const int search_x = (screen_info.width - search_width) / 2;
     const int search_y = 70;
-
 
     search_input = GooeyTextBox_Create(search_x, search_y,
                                        search_width, search_height,
@@ -545,7 +539,6 @@ static void create_ui(void) {
         GooeyContainer_AddWidget(main_window, main_container, 0, search_input);
     }
 
-    /* Close button */
     close_button = GooeyImage_Create("/usr/local/share/gooeyde/cross.png", 
                                    screen_info.width - 50, 20, 32, 32, 
                                    close_application, NULL);
@@ -553,14 +546,12 @@ static void create_ui(void) {
         GooeyContainer_AddWidget(main_window, main_container, 0, close_button);
     }
 
-    /* Page info */
     page_info_label = GooeyLabel_Create("", 18.0f, screen_info.width / 2 - 100, screen_info.height - 60);
     if (page_info_label) {
         GooeyLabel_SetColor(page_info_label, 0x888888);
         GooeyContainer_AddWidget(main_window, main_container, 0, page_info_label);
     }
 
-    /* Navigation buttons */
     const int nav_button_width = 100;
     const int nav_button_height = 35;
     const int nav_button_y = screen_info.height - 100;
@@ -597,7 +588,6 @@ static void create_ui(void) {
         GooeyWidget_MakeVisible(next_label, 0);
     }
 
-    /* Loading label */
     loading_label = GooeyLabel_Create("Loading applications...", 24.0f,
                                       screen_info.width / 2 - 120, screen_info.height / 2);
     if (loading_label) {
@@ -606,10 +596,8 @@ static void create_ui(void) {
         GooeyWidget_MakeVisible(loading_label, 1);
     }
 
-    /* Static array of launch callbacks */
     static void (*launch_callbacks[APPS_PER_PAGE])(int x, int y, void* user_data);
-    
-    /* Initialize the callbacks array */
+
     launch_callbacks[0] = launch_app_callback_0;
     launch_callbacks[1] = launch_app_callback_1;
     launch_callbacks[2] = launch_app_callback_2;
@@ -623,7 +611,6 @@ static void create_ui(void) {
     launch_callbacks[10] = launch_app_callback_10;
     launch_callbacks[11] = launch_app_callback_11;
 
-    /* Create app cards */
     int row, col;
     for (row = 0; row < GRID_ROWS; row++) {
         for (col = 0; col < GRID_COLS; col++) {
@@ -631,7 +618,6 @@ static void create_ui(void) {
             const int x = grid_margin_x + col * (app_card_width + horizontal_spacing);
             const int y = grid_margin_y + row * (app_card_height + vertical_spacing);
 
-            /* App card background */
             app_buttons[grid_index] = GooeyCanvas_Create(x, y, app_card_width, app_card_height, 
                                                         launch_callbacks[grid_index], NULL);
             if (app_buttons[grid_index]) {
@@ -643,14 +629,12 @@ static void create_ui(void) {
                 GooeyWidget_MakeVisible(app_buttons[grid_index], 0);
             }
 
-            /* App icon */
             app_icons[grid_index] = GooeyImage_Create(NULL, x + 15, y + 15, 48, 48, NULL, NULL);
             if (app_icons[grid_index]) {
                 GooeyContainer_AddWidget(main_window, main_container, 0, app_icons[grid_index]);
                 GooeyWidget_MakeVisible(app_icons[grid_index], 0);
             }
 
-            /* App name */
             app_name_labels[grid_index] = GooeyLabel_Create("", 12.0f, x + 75, y + 20);
             if (app_name_labels[grid_index]) {
                 GooeyLabel_SetColor(app_name_labels[grid_index], 0xFFFFFF);
@@ -658,7 +642,6 @@ static void create_ui(void) {
                 GooeyWidget_MakeVisible(app_name_labels[grid_index], 0);
             }
 
-            /* App exec */
             app_exec_labels[grid_index] = GooeyLabel_Create("", 12.0f, x + 75, y + 45);
             if (app_exec_labels[grid_index]) {
                 GooeyLabel_SetColor(app_exec_labels[grid_index], 0xAAAAAA);
@@ -698,7 +681,6 @@ static void update_ui(void) {
     size_t total_count = use_filtered_apps ? filtered_app_count : app_count;
     size_t total_pages = (total_count + APPS_PER_PAGE - 1) / APPS_PER_PAGE;
 
-    /* Update page info */
     char page_info[128];
     if (use_filtered_apps && search_query[0] != '\0') {
         snprintf(page_info, sizeof(page_info), "Page %zu/%zu • %zu apps • Filter: '%s'",
@@ -710,7 +692,6 @@ static void update_ui(void) {
 
     if (page_info_label) GooeyLabel_SetText(page_info_label, page_info);
 
-    /* Update navigation */
     if (prev_button && prev_label) {
         int prev_visible = (current_page > 0);
         GooeyWidget_MakeVisible(prev_button, prev_visible);
@@ -725,7 +706,6 @@ static void update_ui(void) {
 
     AppEntry *current_apps = use_filtered_apps ? filtered_apps : detected_apps;
 
-    /* Update app cards */
     int i;
     for (i = 0; i < APPS_PER_PAGE; i++) {
         const size_t app_index = current_page * APPS_PER_PAGE + i;

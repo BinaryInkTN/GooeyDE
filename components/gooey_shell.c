@@ -4,6 +4,7 @@
 #include <X11/cursorfont.h>
 #include <X11/Xcursor/Xcursor.h>
 #include <X11/extensions/Xrandr.h>
+#include <X11/extensions/Xrender.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -17,8 +18,6 @@
 #include <GLPS/glps_thread.h>
 #include <sys/select.h>
 #include <X11/keysym.h>
-
-#define BAR_HEIGHT 50
 
 static PrecomputedAtoms atoms;
 
@@ -106,6 +105,16 @@ static SplitDirection ChooseSplitDirection(int width, int height, int window_cou
 static TilingNode *BuildTreeRecursive(WindowNode **windows, int count, int x, int y, int width, int height, TilingNode *existing_root);
 static void UpdateTilingNodeGeometry(TilingNode *node, int x, int y, int width, int height);
 static void CleanupWorkspace(Workspace *ws);
+
+static void LaunchDesktopAppsForAllMonitors(GooeyShellState *state);
+static void MoveWindowToMonitor(GooeyShellState *state, WindowNode *node, int monitor_number);
+static void SetWindowOpacity(GooeyShellState *state, Window window, float opacity);
+static void InitializeTransparency(GooeyShellState *state);
+static Atom GetOpacityAtom(GooeyShellState *state);
+static int GetCurrentMonitor(GooeyShellState *state);
+static void BuildDynamicTilingTreeForMonitor(GooeyShellState *state, Workspace *workspace, int monitor_number);
+static void ArrangeWindowsTilingOnMonitor(GooeyShellState *state, Workspace *workspace, int monitor_number);
+static void ArrangeWindowsMonocleOnMonitor(GooeyShellState *state, Workspace *workspace, int monitor_number);
 
 static void LogError(const char *message, ...)
 {
@@ -302,6 +311,8 @@ static void GrabKeys(GooeyShellState *state)
         XKeysymToKeycode(state->display, XK_h),
         XKeysymToKeycode(state->display, XK_l),
         XKeysymToKeycode(state->display, XK_space),
+        XKeysymToKeycode(state->display, XK_bracketleft),
+        XKeysymToKeycode(state->display, XK_bracketright),
     };
 
     for (int i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
@@ -339,7 +350,6 @@ static TilingNode* findContainingSplit(TilingNode *root, WindowNode *target) {
     int in_right = IsWindowInSubtree(root->right, target);
 
     if (in_left && in_right) {
-
         return NULL;
     }
 
@@ -354,7 +364,6 @@ static TilingNode* findVerticalSplitToLeft(TilingNode *root, WindowNode *target)
     if (!root || root->is_leaf) return NULL;
 
     if (root->split == SPLIT_VERTICAL) {
-
         if (IsWindowInSubtree(root->right, target)) {
             return root;
         }
@@ -369,7 +378,6 @@ static TilingNode* findVerticalSplitToRight(TilingNode *root, WindowNode *target
     if (!root || root->is_leaf) return NULL;
 
     if (root->split == SPLIT_VERTICAL) {
-
         if (IsWindowInSubtree(root->left, target)) {
             return root;
         }
@@ -379,6 +387,7 @@ static TilingNode* findVerticalSplitToRight(TilingNode *root, WindowNode *target
     if (found) return found;
     return findVerticalSplitToRight(root->right, target);
 }
+
 static void SendWindowStateThroughDBus(GooeyShellState *state, Window window, const char *state_str)
 {
     if (!state->dbus_connection || !state->is_dbus_init)
@@ -608,6 +617,7 @@ static void InitializeAtoms(Display *display)
     atoms.gooey_fullscreen_app = XInternAtom(display, "GOOEY_FULLSCREEN_APP", False);
     atoms.gooey_stay_on_top = XInternAtom(display, "GOOEY_STAY_ON_TOP", False);
     atoms.gooey_desktop_app = XInternAtom(display, "GOOEY_DESKTOP_APP", False);
+    atoms.net_wm_window_opacity = XInternAtom(display, "_NET_WM_WINDOW_OPACITY", False);
 }
 
 static int InitializeMultiMonitor(GooeyShellState *state)
@@ -743,6 +753,133 @@ static int GetMonitorForWindow(GooeyShellState *state, int x, int y, int width, 
     return best_monitor;
 }
 
+static int GetCurrentMonitor(GooeyShellState *state) {
+    if (!state || state->monitor_info.num_monitors == 0)
+        return 0;
+
+    if (state->focused_window != None) {
+        WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
+        if (node && node->monitor_number >= 0 && 
+            node->monitor_number < state->monitor_info.num_monitors) {
+            return node->monitor_number;
+        }
+    }
+
+    if (state->focused_monitor >= 0 && state->focused_monitor < state->monitor_info.num_monitors) {
+        return state->focused_monitor;
+    }
+
+    return 0;
+}
+
+static void LaunchDesktopAppsForAllMonitors(GooeyShellState *state)
+{
+    if (!state || !state->monitor_info.monitors || state->monitor_info.num_monitors == 0)
+        return;
+
+    LogInfo("Launching desktop apps for %d monitors", state->monitor_info.num_monitors);
+
+    const char *desktop_app_cmd = "/usr/local/bin/gooeyde_desktop";
+
+    for (int i = 0; i < state->monitor_info.num_monitors; i++)
+    {
+        pid_t pid = fork();
+        if (pid == 0)
+        {
+            setenv("GOOEY_DESKTOP_APP", "1", 1);
+            setenv("DISPLAY", DisplayString(state->display), 1);
+
+            char monitor_env[32];
+            snprintf(monitor_env, sizeof(monitor_env), "%d", i);
+            setenv("GOOEY_MONITOR", monitor_env, 1);
+
+            for (int fd = 3; fd < 1024; fd++)
+                close(fd);
+
+            execlp("sh", "sh", "-c", desktop_app_cmd, NULL);
+            exit(1);
+        }
+        else if (pid > 0)
+        {
+            LogInfo("Launched desktop app for monitor %d (PID: %d)", i, pid);
+        }
+        else
+        {
+            LogError("Failed to fork for desktop app on monitor %d", i);
+        }
+    }
+}
+
+static void MoveWindowToMonitor(GooeyShellState *state, WindowNode *node, int monitor_number)
+{
+    if (!node || monitor_number < 0 || monitor_number >= state->monitor_info.num_monitors)
+        return;
+
+    if (node->monitor_number == monitor_number)
+        return;
+
+    LogInfo("Moving window '%s' from monitor %d to monitor %d", 
+            node->title, node->monitor_number, monitor_number);
+
+    int old_monitor = node->monitor_number;
+    node->monitor_number = monitor_number;
+    Monitor *mon = &state->monitor_info.monitors[monitor_number];
+
+    if (node->is_floating)
+    {
+        node->x = mon->x + (mon->width - node->width) / 2;
+        node->y = mon->y + BAR_HEIGHT + (mon->height - BAR_HEIGHT - node->height) / 2;
+
+        if (node->x < mon->x) node->x = mon->x;
+        if (node->y < mon->y + BAR_HEIGHT) node->y = mon->y + BAR_HEIGHT;
+        if (node->x + node->width > mon->x + mon->width) 
+            node->x = mon->x + mon->width - node->width;
+        if (node->y + node->height > mon->y + mon->height)
+            node->y = mon->y + mon->height - node->height;
+    }
+
+    UpdateWindowGeometry(state, node);
+
+    Workspace *ws = GetCurrentWorkspace(state);
+    if (ws) {
+        if (old_monitor >= 0 && old_monitor < state->monitor_info.num_monitors) {
+            ArrangeWindowsTilingOnMonitor(state, ws, old_monitor);
+        }
+        ArrangeWindowsTilingOnMonitor(state, ws, monitor_number);
+    }
+}
+
+static void SetWindowOpacity(GooeyShellState *state, Window window, float opacity)
+{
+    if (!ValidateWindowState(state) || atoms.net_wm_window_opacity == None)
+        return;
+
+    unsigned long opacity_value = (unsigned long)(0xFFFFFFFFUL * opacity);
+
+    XChangeProperty(state->display, window, atoms.net_wm_window_opacity,
+                    XA_CARDINAL, 32, PropModeReplace,
+                    (unsigned char*)&opacity_value, 1);
+}
+
+static Atom GetOpacityAtom(GooeyShellState *state)
+{
+    return atoms.net_wm_window_opacity;
+}
+
+static void InitializeTransparency(GooeyShellState *state)
+{
+    if (atoms.net_wm_window_opacity == None)
+    {
+        LogInfo("Window opacity not supported, transparency disabled");
+        state->supports_opacity = False;
+    }
+    else
+    {
+        LogInfo("Window opacity supported, enabling transparency");
+        state->supports_opacity = True;
+    }
+}
+
 static void InitializeWorkspaces(GooeyShellState *state)
 {
     state->workspaces = malloc(sizeof(Workspace));
@@ -753,7 +890,9 @@ static void InitializeWorkspaces(GooeyShellState *state)
     state->workspaces->master_ratio = 0.6;
     state->workspaces->stack_ratios = NULL;
     state->workspaces->stack_ratios_count = 0;
-    state->workspaces->tiling_root = NULL;
+
+    state->workspaces->monitor_tiling_roots_count = state->monitor_info.num_monitors;
+    state->workspaces->monitor_tiling_roots = calloc(state->monitor_info.num_monitors, sizeof(TilingNode*));
 
     state->current_workspace = 1;
     state->current_layout = LAYOUT_TILING;
@@ -802,7 +941,9 @@ static Workspace *CreateWorkspace(GooeyShellState *state, int workspace_number)
     new_ws->master_ratio = 0.6;
     new_ws->stack_ratios = NULL;
     new_ws->stack_ratios_count = 0;
-    new_ws->tiling_root = NULL;
+
+    new_ws->monitor_tiling_roots_count = state->monitor_info.num_monitors;
+    new_ws->monitor_tiling_roots = calloc(state->monitor_info.num_monitors, sizeof(TilingNode*));
 
     if (!state->workspaces)
     {
@@ -939,9 +1080,7 @@ static TilingNode *BuildTreeRecursive(WindowNode **windows, int count, int x, in
             TilingNode *existing = findExistingNode(existing_root, windows[0]);
             if (existing && existing->parent)
             {
-
                 node->parent = existing->parent;
-
             }
         }
 
@@ -953,7 +1092,6 @@ static TilingNode *BuildTreeRecursive(WindowNode **windows, int count, int x, in
 
     if (existing_root)
     {
-
         TilingNode *findSimilarSplit(TilingNode * current, int target_count)
         {
             if (!current || current->is_leaf)
@@ -1000,9 +1138,14 @@ static TilingNode *BuildTreeRecursive(WindowNode **windows, int count, int x, in
 
     return node;
 }
-static void BuildDynamicTilingTree(GooeyShellState *state, Workspace *workspace)
+
+static void BuildDynamicTilingTreeForMonitor(GooeyShellState *state, Workspace *workspace, int monitor_number)
 {
-    TilingNode *old_root = workspace->tiling_root;
+    if (monitor_number < 0 || monitor_number >= workspace->monitor_tiling_roots_count) {
+        return;
+    }
+
+    TilingNode *old_root = workspace->monitor_tiling_roots[monitor_number];
 
     WindowNode **tiled_windows = NULL;
     int tiled_count = 0;
@@ -1011,8 +1154,8 @@ static void BuildDynamicTilingTree(GooeyShellState *state, Workspace *workspace)
     while (node)
     {
         if (!node->is_floating && !node->is_fullscreen && !node->is_minimized &&
-            !node->is_desktop_app && !node->is_fullscreen_app)
-        {
+            !node->is_desktop_app && !node->is_fullscreen_app &&
+            node->monitor_number == monitor_number) {
             tiled_count++;
         }
         node = node->next;
@@ -1022,7 +1165,7 @@ static void BuildDynamicTilingTree(GooeyShellState *state, Workspace *workspace)
     {
         if (old_root)
             FreeTilingTree(old_root);
-        workspace->tiling_root = NULL;
+        workspace->monitor_tiling_roots[monitor_number] = NULL;
         return;
     }
 
@@ -1033,25 +1176,34 @@ static void BuildDynamicTilingTree(GooeyShellState *state, Workspace *workspace)
     while (node && index < tiled_count)
     {
         if (!node->is_floating && !node->is_fullscreen && !node->is_minimized &&
-            !node->is_desktop_app && !node->is_fullscreen_app)
-        {
+            !node->is_desktop_app && !node->is_fullscreen_app &&
+            node->monitor_number == monitor_number) {
             tiled_windows[index++] = node;
         }
         node = node->next;
     }
 
-    Monitor *mon = &state->monitor_info.monitors[0];
+    Monitor *mon = &state->monitor_info.monitors[monitor_number];
     int usable_width = mon->width - 2 * state->outer_gap;
     int usable_height = mon->height - 2 * state->outer_gap - BAR_HEIGHT;
     int usable_x = mon->x + state->outer_gap;
     int usable_y = mon->y + state->outer_gap + BAR_HEIGHT;
 
-    workspace->tiling_root = BuildTreeRecursive(tiled_windows, tiled_count, usable_x, usable_y, usable_width, usable_height, old_root);
+    workspace->monitor_tiling_roots[monitor_number] = 
+        BuildTreeRecursive(tiled_windows, tiled_count, usable_x, usable_y, usable_width, usable_height, old_root);
 
     if (old_root)
         FreeTilingTree(old_root);
     free(tiled_windows);
 }
+
+static void BuildDynamicTilingTree(GooeyShellState *state, Workspace *workspace)
+{
+    for (int i = 0; i < workspace->monitor_tiling_roots_count; i++) {
+        BuildDynamicTilingTreeForMonitor(state, workspace, i);
+    }
+}
+
 static void ArrangeTilingTree(GooeyShellState *state, TilingNode *node)
 {
     if (!node)
@@ -1084,16 +1236,23 @@ static void ArrangeTilingTree(GooeyShellState *state, TilingNode *node)
     }
 }
 
-static void ArrangeWindowsTiling(GooeyShellState *state, Workspace *workspace)
+static void ArrangeWindowsTilingOnMonitor(GooeyShellState *state, Workspace *workspace, int monitor_number)
 {
-    BuildDynamicTilingTree(state, workspace);
-    ArrangeTilingTree(state, workspace->tiling_root);
+    BuildDynamicTilingTreeForMonitor(state, workspace, monitor_number);
+    ArrangeTilingTree(state, workspace->monitor_tiling_roots[monitor_number]);
 }
 
-static void ArrangeWindowsMonocle(GooeyShellState *state, Workspace *workspace)
+static void ArrangeWindowsTiling(GooeyShellState *state, Workspace *workspace)
+{
+    for (int i = 0; i < workspace->monitor_tiling_roots_count; i++) {
+        ArrangeWindowsTilingOnMonitor(state, workspace, i);
+    }
+}
+
+static void ArrangeWindowsMonocleOnMonitor(GooeyShellState *state, Workspace *workspace, int monitor_number)
 {
     WindowNode *node = workspace->windows;
-    Monitor *mon = &state->monitor_info.monitors[0];
+    Monitor *mon = &state->monitor_info.monitors[monitor_number];
 
     int usable_height = mon->height - 2 * state->outer_gap - BAR_HEIGHT;
     int usable_y = mon->y + state->outer_gap + BAR_HEIGHT;
@@ -1106,7 +1265,8 @@ static void ArrangeWindowsMonocle(GooeyShellState *state, Workspace *workspace)
     while (node)
     {
         if (!node->is_floating && !node->is_fullscreen && !node->is_minimized &&
-            !node->is_desktop_app && !node->is_fullscreen_app)
+            !node->is_desktop_app && !node->is_fullscreen_app &&
+            node->monitor_number == monitor_number)
         {
             node->x = mon->x + state->outer_gap;
             node->y = usable_y + state->inner_gap;
@@ -1121,6 +1281,13 @@ static void ArrangeWindowsMonocle(GooeyShellState *state, Workspace *workspace)
             UpdateWindowGeometry(state, node);
         }
         node = node->next;
+    }
+}
+
+static void ArrangeWindowsMonocle(GooeyShellState *state, Workspace *workspace)
+{
+    for (int i = 0; i < state->monitor_info.num_monitors; i++) {
+        ArrangeWindowsMonocleOnMonitor(state, workspace, i);
     }
 }
 
@@ -1159,10 +1326,11 @@ static int GetTilingResizeArea(GooeyShellState *state, WindowNode *node, int x, 
 
     return 0;
 }
+
 static void HandleTilingResize(GooeyShellState *state, WindowNode *node, int resize_edge, int delta_x, int delta_y)
 {
     Workspace *workspace = GetCurrentWorkspace(state);
-    if (!workspace || !workspace->tiling_root) return;
+    if (!workspace || !workspace->monitor_tiling_roots) return;
 
     typedef struct {
         TilingNode *split;
@@ -1191,7 +1359,8 @@ static void HandleTilingResize(GooeyShellState *state, WindowNode *node, int res
     }
 
     split_count = 0;
-    collectSplits(workspace->tiling_root, node);
+    TilingNode *monitor_root = workspace->monitor_tiling_roots[node->monitor_number];
+    collectSplits(monitor_root, node);
 
     if (split_count == 0) return;
 
@@ -1204,18 +1373,14 @@ static void HandleTilingResize(GooeyShellState *state, WindowNode *node, int res
 
         if (resize_edge == 1) { 
             if (split->split == SPLIT_VERTICAL) {
-
                 if ((is_left && delta_x > 0) || (!is_left && delta_x < 0)) {
-
                     target_split = split;
                     break;
                 }
             }
         } else if (resize_edge == 2) { 
             if (split->split == SPLIT_HORIZONTAL) {
-
                 if ((is_left && delta_y > 0) || (!is_left && delta_y < 0)) {
-
                     target_split = split;
                     break;
                 }
@@ -1261,6 +1426,7 @@ static void HandleTilingResize(GooeyShellState *state, WindowNode *node, int res
 
     TileWindowsOnWorkspace(state, workspace);
 }
+
 static void ResizeMasterArea(GooeyShellState *state, Workspace *workspace, int delta_width)
 {
     Monitor *mon = &state->monitor_info.monitors[0];
@@ -1466,6 +1632,24 @@ void GooeyShell_TileWindows(GooeyShellState *state)
     }
 }
 
+void GooeyShell_TileWindowsOnMonitor(GooeyShellState *state, int monitor_number)
+{
+    Workspace *workspace = GetCurrentWorkspace(state);
+    if (workspace && monitor_number >= 0 && monitor_number < state->monitor_info.num_monitors)
+    {
+        ArrangeWindowsTilingOnMonitor(state, workspace, monitor_number);
+    }
+}
+
+void GooeyShell_RetileAllMonitors(GooeyShellState *state)
+{
+    Workspace *workspace = GetCurrentWorkspace(state);
+    if (workspace)
+    {
+        TileWindowsOnWorkspace(state, workspace);
+    }
+}
+
 void GooeyShell_ToggleFloating(GooeyShellState *state, Window client)
 {
     WindowNode *node = FindWindowNodeByClient(state, client);
@@ -1545,6 +1729,72 @@ void GooeyShell_FocusPreviousWindow(GooeyShellState *state)
     if (prev)
     {
         FocusWindow(state, prev);
+    }
+}
+
+void GooeyShell_MoveWindowToNextMonitor(GooeyShellState *state)
+{
+    if (state->monitor_info.num_monitors <= 1)
+        return;
+
+    WindowNode *current = FindWindowNodeByFrame(state, state->focused_window);
+    if (!current || current->is_desktop_app || current->is_fullscreen_app)
+        return;
+
+    int next_monitor = (current->monitor_number + 1) % state->monitor_info.num_monitors;
+    MoveWindowToMonitor(state, current, next_monitor);
+}
+
+void GooeyShell_MoveWindowToPreviousMonitor(GooeyShellState *state)
+{
+    if (state->monitor_info.num_monitors <= 1)
+        return;
+
+    WindowNode *current = FindWindowNodeByFrame(state, state->focused_window);
+    if (!current || current->is_desktop_app || current->is_fullscreen_app)
+        return;
+
+    int prev_monitor = (current->monitor_number - 1 + state->monitor_info.num_monitors) % state->monitor_info.num_monitors;
+    MoveWindowToMonitor(state, current, prev_monitor);
+}
+
+void GooeyShell_FocusNextMonitor(GooeyShellState *state)
+{
+    if (state->monitor_info.num_monitors <= 1)
+        return;
+
+    int current_monitor = GetCurrentMonitor(state);
+    int next_monitor = (current_monitor + 1) % state->monitor_info.num_monitors;
+
+    state->focused_monitor = next_monitor;
+
+    WindowNode *node = state->window_list;
+    while (node) {
+        if (node->monitor_number == next_monitor && !node->is_minimized) {
+            FocusWindow(state, node);
+            break;
+        }
+        node = node->next;
+    }
+}
+
+void GooeyShell_FocusPreviousMonitor(GooeyShellState *state)
+{
+    if (state->monitor_info.num_monitors <= 1)
+        return;
+
+    int current_monitor = GetCurrentMonitor(state);
+    int prev_monitor = (current_monitor - 1 + state->monitor_info.num_monitors) % state->monitor_info.num_monitors;
+
+    state->focused_monitor = prev_monitor;
+
+    WindowNode *node = state->window_list;
+    while (node) {
+        if (node->monitor_number == prev_monitor && !node->is_minimized) {
+            FocusWindow(state, node);
+            break;
+        }
+        node = node->next;
     }
 }
 
@@ -1646,8 +1896,6 @@ GooeyShellState *GooeyShell_Init(void)
     state->screen = DefaultScreen(state->display);
     state->root = RootWindow(state->display, state->screen);
 
-    InitializeWorkspaces(state);
-
     state->desktop_app_window = None;
     state->fullscreen_app_window = None;
     state->focused_window = None;
@@ -1666,6 +1914,7 @@ GooeyShellState *GooeyShell_Init(void)
     }
 
     InitializeAtoms(state->display);
+    InitializeTransparency(state);
 
     state->gc = XCreateGC(state->display, state->root, 0, NULL);
     if (!state->gc)
@@ -1723,7 +1972,11 @@ GooeyShellState *GooeyShell_Init(void)
     XDefineCursor(state->display, state->root, state->custom_cursor);
     XClearWindow(state->display, state->root);
 
+    InitializeWorkspaces(state);
+
     GrabKeys(state);
+
+    LaunchDesktopAppsForAllMonitors(state);
 
     XFlush(state->display);
 
@@ -1824,6 +2077,11 @@ static void UpdateWindowGeometry(GooeyShellState *state, WindowNode *node)
         {
             DrawTitleBar(state, node);
         }
+    }
+
+    if (state->supports_opacity)
+    {
+        SetWindowOpacity(state, node->frame, WINDOW_OPACITY);
     }
 }
 
@@ -2055,6 +2313,11 @@ static void SetupDesktopApp(GooeyShellState *state, WindowNode *node)
 
     XLowerWindow(state->display, node->frame);
     state->desktop_app_window = node->frame;
+
+    if (state->supports_opacity)
+    {
+        SetWindowOpacity(state, node->frame, WINDOW_OPACITY);
+    }
 }
 
 static void SetupFullscreenApp(GooeyShellState *state, WindowNode *node, int stay_on_top)
@@ -2095,6 +2358,11 @@ static void SetupFullscreenApp(GooeyShellState *state, WindowNode *node, int sta
     }
 
     state->fullscreen_app_window = node->frame;
+
+    if (state->supports_opacity)
+    {
+        SetWindowOpacity(state, node->frame, WINDOW_OPACITY);
+    }
 
     FocusRootWindow(state);
 }
@@ -2271,6 +2539,11 @@ static int CreateFrameWindow(GooeyShellState *state, Window client, int is_deskt
 
     AddToOpenedWindows(frame);
 
+    if (state->supports_opacity)
+    {
+        SetWindowOpacity(state, frame, WINDOW_OPACITY);
+    }
+
     SendWindowStateThroughDBus(state, frame, "opened");
 
     XMapWindow(state->display, frame);
@@ -2398,6 +2671,11 @@ static int CreateFullscreenAppWindow(GooeyShellState *state, Window client, int 
     }
 
     AddToOpenedWindows(frame);
+
+    if (state->supports_opacity)
+    {
+        SetWindowOpacity(state, frame, WINDOW_OPACITY);
+    }
 
     SendWindowStateThroughDBus(state, frame, "opened");
 
@@ -2886,7 +3164,7 @@ static void HandleMotionNotify(GooeyShellState *state, XMotionEvent *ev)
     if (state->is_tiling_resizing && ev->window == state->drag_window && !node->is_floating)
     {
         int delta_x = ev->x_root - state->drag_start_x;
-        int delta_y = ev->y_root - state->drag_start_y;
+        int delta_y = ev->x_root - state->drag_start_y;
 
         HandleTilingResize(state, node, state->tiling_resize_edge, delta_x, delta_y);
 
@@ -2896,7 +3174,7 @@ static void HandleMotionNotify(GooeyShellState *state, XMotionEvent *ev)
     else if (state->is_dragging && ev->window == state->drag_window && node->is_floating)
     {
         int delta_x = ev->x_root - state->drag_start_x;
-        int delta_y = ev->y_root - state->drag_start_y;
+        int delta_y = ev->x_root - state->drag_start_y;
 
         int new_x = state->original_x + delta_x;
         int new_y = state->original_y + delta_y;
@@ -3239,12 +3517,11 @@ void GooeyShell_RunEventLoop(GooeyShellState *state)
                         printf("Alt+H: Make window narrower\n");
                         {
                             Workspace *ws = GetCurrentWorkspace(state);
-                            if (ws && ws->tiling_root && state->focused_window != None)
+                            if (ws && ws->monitor_tiling_roots && state->focused_window != None)
                             {
                                 WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
                                 if (node && !node->is_floating)
                                 {
-
                                     HandleTilingResize(state, node, 1, -30, 0);
                                 }
                             }
@@ -3254,12 +3531,11 @@ void GooeyShell_RunEventLoop(GooeyShellState *state)
                         printf("Alt+L: Make window wider\n");
                         {
                             Workspace *ws = GetCurrentWorkspace(state);
-                            if (ws && ws->tiling_root && state->focused_window != None)
+                            if (ws && ws->monitor_tiling_roots && state->focused_window != None)
                             {
                                 WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
                                 if (node && !node->is_floating)
                                 {
-
                                     HandleTilingResize(state, node, 1, 30, 0);
                                 }
                             }
@@ -3269,12 +3545,11 @@ void GooeyShell_RunEventLoop(GooeyShellState *state)
                         printf("Alt+J: Make window shorter\n");
                         {
                             Workspace *ws = GetCurrentWorkspace(state);
-                            if (ws && ws->tiling_root && state->focused_window != None)
+                            if (ws && ws->monitor_tiling_roots && state->focused_window != None)
                             {
                                 WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
                                 if (node && !node->is_floating)
                                 {
-
                                     HandleTilingResize(state, node, 2, 0, -30);
                                 }
                             }
@@ -3284,12 +3559,11 @@ void GooeyShell_RunEventLoop(GooeyShellState *state)
                         printf("Alt+K: Make window taller\n");
                         {
                             Workspace *ws = GetCurrentWorkspace(state);
-                            if (ws && ws->tiling_root && state->focused_window != None)
+                            if (ws && ws->monitor_tiling_roots && state->focused_window != None)
                             {
                                 WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
                                 if (node && !node->is_floating)
                                 {
-
                                     HandleTilingResize(state, node, 2, 0, 30);
                                 }
                             }
@@ -3311,6 +3585,14 @@ void GooeyShell_RunEventLoop(GooeyShellState *state)
                                 }
                             }
                         }
+                        break;
+                    case XK_bracketleft:
+                        printf("Alt+[: Moving window to previous monitor\n");
+                        GooeyShell_MoveWindowToPreviousMonitor(state);
+                        break;
+                    case XK_bracketright:
+                        printf("Alt+]: Moving window to next monitor\n");
+                        GooeyShell_MoveWindowToNextMonitor(state);
                         break;
                     case XK_1:
                     case XK_2:
@@ -3486,22 +3768,26 @@ int GooeyShell_IsWindowMinimized(GooeyShellState *state, Window client)
 
     return node->is_minimized;
 }
-
 static void CleanupWorkspace(Workspace *ws)
 {
     if (!ws)
         return;
-    if (ws->stack_ratios)
-    {
+
+    if (ws->monitor_tiling_roots) {
+        for (int i = 0; i < ws->monitor_tiling_roots_count; i++) {
+            if (ws->monitor_tiling_roots[i]) {
+                FreeTilingTree(ws->monitor_tiling_roots[i]);
+            }
+        }
+        free(ws->monitor_tiling_roots);
+    }
+
+    if (ws->stack_ratios) {
         free(ws->stack_ratios);
     }
-    if (ws->tiling_root)
-    {
-        FreeTilingTree(ws->tiling_root);
-    }
+
     free(ws);
 }
-
 void GooeyShell_Cleanup(GooeyShellState *state)
 {
     if (!state)

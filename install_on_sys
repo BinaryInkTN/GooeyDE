@@ -56,7 +56,7 @@ function install_all() {
     mkdir -p "$(dirname "$LOGFILE")"
     touch "$LOGFILE"
 
-    echo -e "${GREEN}✅ Installation complete!${RESET}"
+    echo -e "${GREEN}Installation complete!${RESET}"
     echo "Select 'GooeyDE' from your login manager."
 }
 
@@ -73,7 +73,7 @@ function uninstall_all() {
     rm -rf "$SHARE_DIR"
     rm -f "$SESSION_DIR/$SESSION_FILE"
 
-    echo -e "${GREEN}✅ Uninstallation complete!${RESET}"
+    echo -e "${GREEN}Uninstallation complete!${RESET}"
 }
 
 # Ensure root privileges

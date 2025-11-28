@@ -48,6 +48,7 @@ target_link_libraries(gooeyde_systemsettings ${COMMON_LIBS})
 add_executable(gooeyde_desktop components/gooeyde_desktop.c)
 target_link_libraries(gooeyde_desktop ${COMMON_LIBS})
 
+
 add_custom_command(TARGET gooey_shell POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_SOURCE_DIR}/assets
