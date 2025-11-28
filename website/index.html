@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GooeyWM - Modern WM</title>
+    <meta name="description" content="Gooey is a modern, customizable desktop environment built for productivity and aesthetics. Experience a beautiful workflow with powerful features.">
+    <link rel="stylesheet" href="./output.css">
+    <link rel="shortcut icon" href="./assets/favicon.png" type="image/x-icon">
+    <style>
+        .command-box {
+            background: #1e1b4b;
+            border: 1px solid #4f46e5;
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin: 20px 0;
+            max-width: 600px;
+            transition: all 0.3s ease;
+        }
+        
+        .command-box:hover {
+            box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.3);
+        }
+        
+        .command-text {
+            color: #e2e8f0;
+            overflow-x: auto;
+            white-space: nowrap;
+            padding-right: 10px;
+        }
+        
+        .copy-btn {
+            background: #4f46e5;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 6px 12px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            flex-shrink: 0;
+        }
+        
+        .copy-btn:hover {
+            background: #4338ca;
+        }
+        
+        .copy-btn:active {
+            transform: scale(0.95);
+        }
+        
+        .copy-btn.copied {
+            background: #10b981;
+        }
+        
+        .install-steps {
+            counter-reset: step-counter;
+            max-width: 600px;
+            margin: 30px auto;
+        }
+        
+        .install-step {
+            position: relative;
+            padding-left: 60px;
+            margin-bottom: 30px;
+        }
+        
+        .install-step:before {
+            counter-increment: step-counter;
+            content: counter(step-counter);
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 40px;
+            height: 40px;
+            background: #4f46e5;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: white;
+        }
+        
+        .keybind-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 30px;
+        }
+        
+        .keybind-card {
+            background: rgba(30, 27, 75, 0.5);
+            border: 1px solid #4f46e5;
+            border-radius: 10px;
+            padding: 20px;
+            transition: all 0.3s ease;
+        }
+        
+        .keybind-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(79, 70, 229, 0.2);
+        }
+        
+        .keybind-combo {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+        
+        .keybind-key {
+            background: #4f46e5;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        
+        .keybind-plus {
+            color: #cbd5e1;
+            font-size: 14px;
+        }
+        
+        .keybind-description {
+            color: #cbd5e1;
+            font-size: 14px;
+        }
+    </style>
+</head>
+
+<body class="bg-slate-950 text-slate-100">
+        <!-- Alpha Access Banner -->
+    <div class="bg-amber-500 text-amber-950 text-center py-2 px-4 font-medium flex items-center justify-center gap-2">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-alert-triangle">
+            <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>
+            <line x1="12" x2="12" y1="9" y2="13"/>
+            <line x1="12" x2="12.01" y1="17" y2="17"/>
+        </svg>
+        <span>GooeyWM is in Early Alpha - Expect bugs and missing features</span>
+    </div>
+
+    <nav
+        class="sticky top-0 z-50 flex items-center justify-between w-full h-18 px-6 md:px-16 lg:px-24 xl:px-32 backdrop-blur bg-slate-950/80">
+        <a href="/">
+            <img class="w-8" width="150" height="50" alt="Gooey logo" src="assets/logo.png" />
+        </a>
+        <div class="hidden lg:flex items-center gap-8 transition duration-500">
+            <a href="#features" class="hover:text-slate-300 transition">
+                Features
+            </a>
+            <a href="#keybinds" class="hover:text-slate-300 transition">
+                Keybinds
+            </a>
+            <a href="#why" class="hover:text-slate-300 transition">
+                Why GooeyWM?
+            </a>
+        </div>
+        <div class="hidden lg:block space-x-3">
+            <a href="https://github.com/BinaryInkTN/GooeyDE">
+            <button
+                class="hover:bg-slate-300/20 transition px-6 py-2 border border-slate-400 rounded-md active:scale-95">
+                Github Repo
+            </button>
+            </a>
+        </div>
+        <button class="lg:hidden active:scale-90 transition" id="menu-button">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                class="lucide lucide-menu size-6.5" aria-hidden="true">
+                <path d="M4 5h16"></path>
+                <path d="M4 12h16"></path>
+                <path d="M4 19h16"></path>
+            </svg>
+        </button>
+    </nav>
+
+    <div id="nav-links" class="fixed inset-0 z-[100] bg-black/60 backdrop-blur flex flex-col items-center justify-center text-lg gap-8 lg:hidden transition-transform duration-400 -translate-x-full">
+        <a href="/#features">
+            Features
+        </a>
+        <a href="/#screenshots">
+            Screenshots
+        </a>
+        <a href="/#keybinds">
+            Keybinds
+        </a>
+        <a href="/#testimonials">
+            Testimonials
+        </a>
+        <a href="/#download">
+            Download
+        </a>
+        <button id="close-menu" class="active:ring-3 active:ring-white aspect-square size-10 p-1 items-center justify-center bg-slate-100 hover:bg-slate-200 transition text-black rounded-md flex">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                class="lucide lucide-x" aria-hidden="true">
+                <path d="M18 6 6 18"></path>
+                <path d="m6 6 12 12"></path>
+            </svg>
+        </button>
+    </div>
+    
+    <!-- Hero Section -->
+     <section class="flex flex-col items-center -mt-18">
+        <svg class="absolute -z-10 w-full -mt-40 md:mt-0" width="1440" height="676" viewBox="0 0 1440 676" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="-92" y="-948" width="1624" height="1624" rx="812" fill="url(#a)"></rect>
+            <defs>
+                <radialGradient id="a" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse"
+                    gradientTransform="rotate(90 428 292)scale(812)">
+                    <stop offset=".63" stop-color="#372AAC" stop-opacity="0"></stop>
+                    <stop offset="1" stop-color="#372AAC"></stop>
+                </radialGradient>
+            </defs>
+        </svg>
+        <a class="flex items-center mt-48 gap-2 border border-slate-600 text-gray-50 rounded-full px-4 py-2 fade-in">
+            <div class="size-2.5 bg-green-500 rounded-full animate-pulse"></div>
+            <span>Alpha Available for Linux</span>
+        </a>
+        
+        <h1 class="text-center text-5xl leading-[68px] md:text-6xl md:leading-[70px] mt-4 font-semibold max-w-3xl fade-in">
+		The WM with Zero Bloat
+        </h1>
+        <p class="text-center text-base max-w-lg mt-2 fade-in">
+            GooeyWM is a modern, tiling Window Manager that combines aesthetics with productivity.
+        </p>
+        
+        <!-- Single Command Installation -->
+        <div class="w-full max-w-2xl mt-8 fade-in">
+            <h3 class="text-center text-lg font-medium mb-4">Install with a single command:</h3>
+            <div class="command-box">
+                <div class="command-text">curl -s https://gooeyde.org/install.sh | bash</div>
+                <button class="copy-btn" id="copy-command">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-copy">
+                        <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+                        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+                    </svg>
+                    Copy
+                </button>
+            </div>
+            <p class="text-center text-sm text-slate-400 mt-2">Run this command in your terminal to install GooeyWM</p>
+        </div>
+        
+       
+        <figure class="relative w-full h-full [perspective:800px] mt-16 max-w-5xl mx-auto flex flex-col items-center justify-center fade-in">
+            <div class="relative [transform-style:preserve-3d] w-full max-w-5xl">
+                <img class="w-full rounded-[15px] will-change-transform [transform:translateZ(0)]" alt="GooeyWM desktop environment showcase" src="assets/overview.jpg" />
+            </div>
+        </figure>
+    </section>
+
+    <!-- Features Section -->
+    <section class="flex flex-col items-center" id="features">
+        <div class="flex flex-col items-center mt-32">
+            <h2 class="text-center text-4xl font-semibold max-w-2xl fade-in">
+                Powerful
+                <span class="bg-gradient-to-t from-indigo-600 to-black p-1 bg-left inline-block bg-no-repeat">Features</span>
+            </h2>
+            <p class="text-center text-slate-400 max-w-lg mt-3 fade-in">
+                GooeyWM combines the best of tiling window managers with a beautiful, user-friendly interface.
+            </p>
+        </div>
+        <div class="flex items-center gap-4 h-100 w-full max-w-5xl mt-18 mx-auto">
+            <div class="relative group flex-grow h-[400px] rounded-xl overflow-hidden hover:w-full w-56 transition-all duration-500 fade-in">
+                <img class="h-full w-full object-cover object-center" alt="Tiling window management"
+                    src="assets/screen.jpg" />
+                <div class="absolute inset-0 flex flex-col justify-end p-10 text-white bg-black/50 transition-all duration-300 opacity-0 group-hover:opacity-100">
+                    <h1 class="text-3xl font-semibold">Tiling Window Management</h1>
+                    <p class="text-sm mt-2">
+                        Automatically arrange windows for maximum productivity and screen space utilization.
+                    </p>
+                </div>
+            </div>
+            <div class="relative group flex-grow h-[400px] rounded-xl overflow-hidden hover:w-full w-56 transition-all duration-500 fade-in">
+                <img class="h-full w-full object-cover object-right" alt="Customizable interface"
+                    src="assets/configuration.jpg" />
+                <div class="absolute inset-0 flex flex-col justify-end p-10 text-white bg-black/50 transition-all duration-300 opacity-0 group-hover:opacity-100">
+                    <h1 class="text-3xl font-semibold">Fully Configurable</h1>
+                    <p class="text-sm mt-2">
+                        A en easy to read and to modify config file.
+                    </p>
+                </div>
+            </div>
+            <div class="relative group flex-grow h-[400px] rounded-xl overflow-hidden hover:w-full w-56 transition-all duration-500 fade-in">
+    <img class="h-full w-full object-cover object-center" alt="Workspace management"
+        src="assets/workspace.jpg" />
+    <div class="absolute inset-0 flex flex-col justify-end p-10 text-white bg-black/50 transition-all duration-300 opacity-0 group-hover:opacity-100">
+        <h1 class="text-3xl font-semibold">Workspaces</h1>
+        <p class="text-sm mt-2">
+            Organize your workflow across multiple virtual desktops for better productivity and window management.
+        </p>
+    </div>
+</div>
+        </div>
+    </section>
+
+    <!-- Default Keybinds Section -->
+    <section class="flex flex-col items-center mt-32" id="keybinds">
+        <div class="flex flex-col items-center">
+            <h2 class="text-center text-4xl font-semibold max-w-2xl fade-in">
+                Default
+                <span class="bg-gradient-to-t from-indigo-600 to-black p-1 bg-left inline-block bg-no-repeat">Keybinds</span>
+            </h2>
+            <p class="text-center text-slate-400 max-w-lg mt-3 fade-in">
+                Master your workflow with these essential keyboard shortcuts.
+            </p>
+        </div>
+        
+        <div class="w-full max-w-5xl mt-12 fade-in">
+            <div class="keybind-grid">
+                <!-- Window Management -->
+                <div class="keybind-card">
+                    <h3 class="text-lg font-semibold mb-5 text-indigo-300">Window Management</h3>
+                    <div class="space-y-4">
+                        <div class="keybind-combo">
+                            <span class="keybind-key">Alt</span>
+                            <span class="keybind-plus">+</span>
+                            <span class="keybind-key">F</span>
+                            <span class="keybind-description ml-2">Toggle floating mode</span>
+                        </div>
+                        <div class="keybind-combo">
+                            <span class="keybind-key">Alt</span>
+                            <span class="keybind-plus">+</span>
+                            <span class="keybind-key">J</span>
+                            <span class="keybind-description ml-2">Focus next window</span>
+                        </div>
+                        <div class="keybind-combo">
+                            <span class="keybind-key">Alt</span>
+                            <span class="keybind-plus">+</span>
+                            <span class="keybind-key">K</span>
+                            <span class="keybind-description ml-2">Focus previous window</span>
+                        </div>
+                                <div class="keybind-combo">
+                            <span class="keybind-key">Alt</span>
+                            <span class="keybind-plus">+</span>
+                            <span class="keybind-key">]</span>
+                            <span class="keybind-description ml-2">Send window to next monitor</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Window Resizing -->
+                <div class="keybind-card">
+                    <h3 class="text-lg font-semibold  mb-5 text-indigo-300">Window Resizing</h3>
+                    <div class="space-y-4">
+                        <div class="keybind-combo">
+                            <span class="keybind-key">Alt</span>
+                            <span class="keybind-plus">+</span>
+                            <span class="keybind-key">H</span>
+                            <span class="keybind-description ml-2">Shrink window width</span>
+                        </div>
+                        <div class="keybind-combo">
+                            <span class="keybind-key">Alt</span>
+                            <span class="keybind-plus">+</span>
+                            <span class="keybind-key">L</span>
+                            <span class="keybind-description ml-2">Expand window width</span>
+                        </div>
+                        <div class="keybind-combo">
+                            <span class="keybind-key">Alt</span>
+                            <span class="keybind-plus">+</span>
+                            <span class="keybind-key">Y</span>
+                            <span class="keybind-description ml-2">Shrink window height</span>
+                        </div>
+                        <div class="keybind-combo">
+                            <span class="keybind-key">Alt</span>
+                            <span class="keybind-plus">+</span>
+                            <span class="keybind-key">N</span>
+                            <span class="keybind-description ml-2">Expand window height</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Layout Modes -->
+                <div class="keybind-card">
+                    <h3 class="text-lg font-semibold  mb-5  text-indigo-300">Layout Modes</h3>
+                    <div class="space-y-4">
+                        <div class="keybind-combo">
+                            <span class="keybind-key">Alt</span>
+                            <span class="keybind-plus">+</span>
+                            <span class="keybind-key">T</span>
+                            <span class="keybind-description ml-2">Switch to tiling mode</span>
+                        </div>
+                        <div class="keybind-combo">
+                            <span class="keybind-key">Alt</span>
+                            <span class="keybind-plus">+</span>
+                            <span class="keybind-key">M</span>
+                            <span class="keybind-description ml-2">Switch to monocle mode</span>
+                        </div>
+                        <div class="keybind-combo">
+                            <span class="keybind-key">Alt</span>
+                            <span class="keybind-plus">+</span>
+                            <span class="keybind-key">Space</span>
+                            <span class="keybind-description ml-2">Toggle between modes</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- System & Multi-Monitor -->
+                <div class="keybind-card">
+                    <h3 class="text-lg font-semibold mb-5 text-indigo-300">System</h3>
+                    <div class="space-y-4">
+                
+                        <div class="keybind-combo">
+                            <span class="keybind-key">Alt</span>
+                            <span class="keybind-plus">+</span>
+                            <span class="keybind-key">Escape</span>
+                            <span class="keybind-description ml-2">Logout menu</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="flex flex-col items-center mt-16">
+                <p>All keybinds are fully customizable in the configuration file.</p>
+                 <div class="command-box">
+                <div class="command-text">~/.config/gooey_shell/config</div>
+                
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- About Section -->
+    <section class="flex flex-col items-center" id="why">
+        <div class="flex flex-col items-center mt-32">
+            <h2 class="text-center text-4xl font-semibold max-w-2xl fade-in">
+                Why Choose 
+                <span class="bg-gradient-to-t from-indigo-600 to-black p-1 bg-left inline-block bg-no-repeat">GooeyWM</span>
+            </h2>
+            <p class="text-center text-slate-400 max-w-lg mt-3 fade-in">Experience the perfect balance of form and function with our desktop environment.</p>
+        </div>
+        <div class="relative max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 px-8 md:px-0 mt-18">
+            <div class="py-10 border-b border-slate-700 md:py-0 md:border-r md:border-b-0 md:px-10 fade-in">
+                <div class="size-10 p-2 bg-indigo-600/20 border border-indigo-600/30 rounded">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-zap">
+                        <path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>
+                    </svg>
+                </div>
+                <div class="mt-5 space-y-2">
+                    <h3 class="text-base font-medium text-slate-200">Lightning-Fast Performance</h3>
+                    <p class="text-sm text-slate-400">Minimal resource usage with optimized window management.</p>
+                </div>
+            </div>
+            <div class="py-10 border-b border-slate-700 md:py-0 lg:border-r md:border-b-0 md:px-10 fade-in">
+                <div class="size-10 p-2 bg-indigo-600/20 border border-indigo-600/30 rounded">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-palette">
+                        <circle cx="13.5" cy="6.5" r=".5" fill="currentColor"/>
+                        <circle cx="17.5" cy="10.5" r=".5" fill="currentColor"/>
+                        <circle cx="8.5" cy="7.5" r=".5" fill="currentColor"/>
+                        <circle cx="6.5" cy="12.5" r=".5" fill="currentColor"/>
+                        <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>
+                    </svg>
+                </div>
+                <div class="mt-5 space-y-2">
+                    <h3 class="text-base font-medium text-slate-200">Beautifully Designed</h3>
+                    <p class="text-sm text-slate-400">Simple intuitive interface.</p>
+                </div>
+            </div>
+            <div class="py-10 border-b border-slate-700 md:py-0 md:border-b-0 md:px-10 fade-in">
+                <div class="size-10 p-2 bg-indigo-600/20 border border-indigo-600/30 rounded">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-puzzle">
+                        <path d="M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.498.925.968a.979.979 0 0 1-.276.837l-1.61 1.61a2.404 2.404 0 0 1-1.705.707 2.402 2.402 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877l-1.568-1.568A2.402 2.402 0 0 1 1.998 12c0-.617.236-1.234.706-1.704L4.23 8.77a1.026 1.026 0 0 0 .29-.877c-.074-.494-.504-.84-.968-1.02a2.5 2.5 0 1 1 3.237-3.237c.18.463.527.894 1.02.967a1.026 1.026 0 0 0 .877-.29l1.568-1.568A2.402 2.402 0 0 1 12 1.998c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877.29.493-.074.84-.504 1.02-.968a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02Z"/>
+                    </svg>
+                </div>
+                <div class="mt-5 space-y-2">
+                    <h3 class="text-base font-medium text-slate-200">Built from scratch.</h3>
+                    <p class="text-sm text-slate-400">Doesn't use QT, GTK or any bloated GUI Framework.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+        
+        <div class="relative max-w-5xl py-20 md:py-26 mt-18 md:w-full overflow-hidden mx-2 md:mx-auto border border-indigo-900 flex flex-col md:flex-row items-center justify-between bg-gradient-to-br from-[#401B98]/5 to-[#180027]/10 rounded-3xl p-4 md:p-10 text-white fade-in">
+            <div class="absolute pointer-events-none top-10 -z-1 left-20 size-64 bg-gradient-to-br from-[#536DFF] to-[#4F39F6]/60 blur-[180px]"></div>
+            <div class="absolute pointer-events-none bottom-10 -z-1 right-20 size-64 bg-gradient-to-br from-[#536DFF] to-[#4F39F6]/60 blur-[180px]"></div>
+            <div class="flex flex-col items-center md:items-start max-md:text-center">
+              
+                <h1 class="text-3xl font-medium max-w-xl mt-5 bg-gradient-to-r from-white to-[#b6abff] text-transparent bg-clip-text">
+                    Boost your productivity with GooeyWM.
+                </h1>
+                <p class="text-base text-slate-400 max-w-lg mt-4">
+                    Download GooeyWM today and experience a desktop environment that works the way you do.
+                </p>
+                <div class="flex flex-wrap gap-4 mt-6">
+                   
+                     <div class="command-box">
+                <div class="command-text">curl -s https://gooeyde.org/install.sh | bash</div>
+                <button class="copy-btn" id="copy-command">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-copy">
+                        <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+                        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+                    </svg>
+                    Copy
+                </button>
+            </div>
+                </div>
+            </div>
+            <div class="md:-mr-16 max-md:mt-10">
+                <img class="max-w-xs md:max-w-sm" alt="" src="https://raw.githubusercontent.com/prebuiltui/prebuiltui/main/assets/trusted-brand/image-fc6e.png">
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer Section -->
+    <footer class="px-6 md:px-16 lg:px-24 xl:px-32 w-full text-sm text-slate-400 mt-40">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-14">
+            <div class="sm:col-span-2 lg:col-span-1">
+                <a href="/">
+                <img class="w-9" width="138" height="36" alt="GooeyWM logo" src="assets/logo.png"></a>
+                <p class="text-sm/7 mt-6">
+                    GooeyWM is a modern, tiling Window Manager that combines aesthetics with productivity. 
+                    Experience a beautiful workflow with powerful features.
+                </p>
+            </div>
+           
+        </div>
+        <p class="py-4 text-center border-t mt-6 border-slate-700">
+            Copyright 2025 © <a href="/">GooeyWM</a> All Right Reserved.
+        </p>
+    </footer>
+    <script>
+        // Mobile menu functionality
+        document.addEventListener('DOMContentLoaded', function() {
+            const menuButton = document.getElementById('menu-button');
+            const navLinks = document.getElementById('nav-links');
+            const closeMenu = document.getElementById('close-menu');
+            
+            menuButton.addEventListener('click', function() {
+                navLinks.classList.remove('-translate-x-full');
+            });
+            
+            closeMenu.addEventListener('click', function() {
+                navLinks.classList.add('-translate-x-full');
+            });
+            
+            // Close menu when clicking on a link
+            const mobileLinks = navLinks.querySelectorAll('a');
+            mobileLinks.forEach(link => {
+                link.addEventListener('click', function() {
+                    navLinks.classList.add('-translate-x-full');
+                });
+            });
+            
+            // Copy command functionality
+            const copyButtons = document.querySelectorAll('.copy-btn');
+            const commandText = 'curl -s https://gooeyde.org/install.sh | bash';
+            
+            copyButtons.forEach(button => {
+                button.addEventListener('click', function() {
+                    navigator.clipboard.writeText(commandText).then(() => {
+                        // Visual feedback
+                        button.innerHTML = `
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-check">
+                                <path d="M20 6 9 17l-5-5"/>
+                            </svg>
+                            Copied!
+                        `;
+                        button.classList.add('copied');
+                        
+                        // Reset after 2 seconds
+                        setTimeout(() => {
+                            button.innerHTML = `
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-copy">
+                                    <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+                                    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+                                </svg>
+                                Copy
+                            `;
+                            button.classList.remove('copied');
+                        }, 2000);
+                    }).catch(err => {
+                        console.error('Failed to copy: ', err);
+                    });
+                });
+            });
+            
+            // Smooth scrolling for all anchor links
+            document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+                anchor.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    
+                    const targetId = this.getAttribute('href');
+                    if (targetId === '#') return;
+                    
+                    const targetElement = document.querySelector(targetId);
+                    if (targetElement) {
+                        targetElement.scrollIntoView({
+                            behavior: 'smooth',
+                            block: 'start'
+                        });
+                    }
+                });
+            });
+            
+            // Fade-in animation on scroll
+            const fadeElements = document.querySelectorAll('.fade-in');
+            
+            const fadeInOnScroll = () => {
+                fadeElements.forEach(element => {
+                    const elementTop = element.getBoundingClientRect().top;
+                    const elementVisible = 150;
+                    
+                    if (elementTop < window.innerHeight - elementVisible) {
+                        element.classList.add('visible');
+                    }
+                });
+            };
+            
+            // Check on load and scroll
+            window.addEventListener('load', fadeInOnScroll);
+            window.addEventListener('scroll', fadeInOnScroll);
+        });
+    </script>
+</body>
+
+</html>
