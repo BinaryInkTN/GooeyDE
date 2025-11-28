@@ -7,7 +7,7 @@
 #include <stdbool.h>
 
 #define WINDOW_MANAGER_NAME "GooeyShell"
-#define BAR_HEIGHT 30
+#define BAR_HEIGHT 45
 #define TITLE_BAR_HEIGHT 24
 #define BORDER_WIDTH 3
 #define BUTTON_SIZE 12
