@@ -693,8 +693,8 @@ static void create_ui(void) {
     }
 
     prev_label = GooeyLabel_Create("Previous", layout.label_font_size, 
-                                  grid_margin_x + layout.nav_button_width / 2,
-                                  nav_button_y + layout.nav_button_height / 2);
+                                  grid_margin_x + layout.nav_button_width / 2 - 10,
+                                  nav_button_y + layout.nav_button_height / 2 + 5);
     if (prev_label) {
         GooeyLabel_SetColor(prev_label, 0xFFFFFF);
         GooeyContainer_AddWidget(main_window, main_container, 0, prev_label);
@@ -714,8 +714,8 @@ static void create_ui(void) {
     }
 
     next_label = GooeyLabel_Create("Next", layout.label_font_size, 
-                                 grid_margin_x + grid_width - layout.nav_button_width / 2,
-                                 nav_button_y + layout.nav_button_height / 2);
+                                 grid_margin_x + grid_width - layout.nav_button_width / 2 - 10,
+                                 nav_button_y + layout.nav_button_height / 2 + 5);
     if (next_label) {
         GooeyLabel_SetColor(next_label, 0xFFFFFF);
         GooeyContainer_AddWidget(main_window, main_container, 0, next_label);
