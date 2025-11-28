@@ -13,11 +13,6 @@ int main()
         return 1;
     }
 
-    printf("GooeyShell Desktop Environment Started\n");
-    printf("Press Alt+F4 to close focused window\n");
-    printf("Press Alt+F11 to toggle fullscreen\n");
-
-
    
     GooeyShell_RunEventLoop(desktop);
 
