@@ -306,20 +306,6 @@ static char *expand_icon_path(const char *icon_name) {
 static int is_valid_application(const char *exec) {
     if (!exec || *exec == '\0') return 0;
 
-    const char *hidden_keywords[] = {
-        "debian-", "xterm", "uxterm", "gnome-terminal", "konsole", "terminal",
-        "xfce4-terminal", "lxterminal", "stterm", "eterm", "terminology",
-        "tilix", "terminator", "guake", "tilda", "yakuake", "kgx",
-        "io.elementary.terminal", "org.kde.konsole", "com.gexperts.Tilix",
-        NULL
-    };
-
-    for (int i = 0; hidden_keywords[i] != NULL; i++) {
-        if (strstr(exec, hidden_keywords[i]) != NULL) {
-            return 0;
-        }
-    }
-
     return 1;
 }
 

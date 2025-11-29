@@ -170,7 +170,6 @@ static void ScheduleWindowListUpdate(GooeyShellState *state)
     if (!window_list_update_pending)
     {
         window_list_update_pending = 1;
-        // Process window list updates here
         window_list_update_pending = 0;
     }
 }
