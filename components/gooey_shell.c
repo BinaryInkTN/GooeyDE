@@ -22,19 +22,49 @@
 #include <sys/stat.h>
 
 // Safe memory management macros
-#define SAFE_FREE(ptr) do { if (ptr) { free(ptr); ptr = NULL; } } while(0)
-#define SAFE_XFREE(ptr) do { if (ptr) { XFree(ptr); } } while(0)
-#define SAFE_CLOSE_DISPLAY(dpy) do { if (dpy) { XCloseDisplay(dpy); } } while(0)
-#define SAFE_DESTROY_WINDOW(dpy, win) do { if (dpy && win) { XDestroyWindow(dpy, win); } } while(0)
+#define SAFE_FREE(ptr)  \
+    do                  \
+    {                   \
+        if (ptr)        \
+        {               \
+            free(ptr);  \
+            ptr = NULL; \
+        }               \
+    } while (0)
+#define SAFE_XFREE(ptr) \
+    do                  \
+    {                   \
+        if (ptr)        \
+        {               \
+            XFree(ptr); \
+        }               \
+    } while (0)
+#define SAFE_CLOSE_DISPLAY(dpy) \
+    do                          \
+    {                           \
+        if (dpy)                \
+        {                       \
+            XCloseDisplay(dpy); \
+        }                       \
+    } while (0)
+#define SAFE_DESTROY_WINDOW(dpy, win) \
+    do                                \
+    {                                 \
+        if (dpy && win)               \
+        {                             \
+            XDestroyWindow(dpy, win); \
+        }                             \
+    } while (0)
 
 static PrecomputedAtoms atoms;
 
 static Window *opened_windows = NULL;
 static int opened_windows_count = 0;
 static int opened_windows_capacity = 0;
-static int dbus_thread_running = 0;
+static volatile int dbus_thread_running = 0;
 static gthread_t dbus_thread;
 static gthread_mutex_t dbus_mutex;
+static gthread_mutex_t window_list_mutex;
 static int window_list_update_pending = 0;
 static int pending_x_flush = 0;
 
@@ -87,7 +117,6 @@ static void SendWorkspaceChangedThroughDBus(GooeyShellState *state, int old_work
 static void HandleDBusWindowCommand(GooeyShellState *state, DBusMessage *msg);
 static void ScheduleWindowListUpdate(GooeyShellState *state);
 static void OptimizedXFlush(GooeyShellState *state);
-static void ProcessPendingEvents(GooeyShellState *state);
 static void FocusRootWindow(GooeyShellState *state);
 
 static void InitializeWorkspaces(GooeyShellState *state);
@@ -129,10 +158,10 @@ static void ArrangeWindowsTilingOnMonitor(GooeyShellState *state, Workspace *wor
 static void ArrangeWindowsMonocleOnMonitor(GooeyShellState *state, Workspace *workspace, int monitor_number);
 
 static void HandleMouseFocus(GooeyShellState *state, XMotionEvent *ev);
-static char* ExpandPath(const char* path);
-static int ParseColor(const char* color_str);
-static int LoadConfigFile(GooeyShellState *state, const char* config_path);
-static void CreateDefaultConfig(const char* config_path);
+static char *ExpandPath(const char *path);
+static int ParseColor(const char *color_str);
+static int LoadConfigFile(GooeyShellState *state, const char *config_path);
+static void CreateDefaultConfig(const char *config_path);
 static KeyCode ParseKeybind(GooeyShellState *state, const char *keybind_str, unsigned int *mod_mask);
 static void InitializeDefaultKeybinds(KeybindConfig *keybinds);
 static void FreeKeybinds(KeybindConfig *keybinds);
@@ -184,17 +213,6 @@ static void OptimizedXFlush(GooeyShellState *state)
     }
 }
 
-static void ProcessPendingEvents(GooeyShellState *state)
-{
-    while (XPending(state->display))
-    {
-        XEvent ev;
-        XNextEvent(state->display, &ev);
-        XPutBackEvent(state->display, &ev);
-        break;
-    }
-}
-
 static void ProcessDBusMessage(GooeyShellState *state, DBusMessage *msg)
 {
     if (!state || !msg)
@@ -223,20 +241,28 @@ static void ProcessDBusMessage(GooeyShellState *state, DBusMessage *msg)
         HandleDBusWindowCommand(state, msg);
     }
 }
-
 static void *DBusListenerThread(void *arg)
 {
     GooeyShellState *state = (GooeyShellState *)arg;
 
-    if (!state || !state->dbus_connection || !state->is_dbus_init)
+    if (!state || !state->dbus_connection)
     {
         return NULL;
     }
 
     LogInfo("DBus listener thread started");
 
-    while (dbus_thread_running && state->is_dbus_init)
+    while (dbus_thread_running)
     {
+        glps_thread_mutex_lock(&dbus_mutex);
+        int dbus_initialized = state->is_dbus_init;
+        glps_thread_mutex_unlock(&dbus_mutex);
+
+        if (!dbus_initialized)
+        {
+            break;
+        }
+
         if (!dbus_connection_read_write(state->dbus_connection, 10))
         {
             usleep(10000);
@@ -309,92 +335,165 @@ static void SetupDBUS(GooeyShellState *state)
     }
 }
 
-static KeyCode ParseKeybind(GooeyShellState *state, const char *keybind_str, unsigned int *mod_mask) {
-    if (!keybind_str || !keybind_str[0]) return 0;
+static KeyCode ParseKeybind(GooeyShellState *state, const char *keybind_str, unsigned int *mod_mask)
+{
+    if (!keybind_str || !keybind_str[0])
+        return 0;
 
     *mod_mask = 0;
     char key_name[64] = {0};
+    KeyCode keycode = 0;
+    char *copy = NULL;
 
-    char *copy = strdup(keybind_str);
-    if (!copy) return 0;
-    
+    copy = strdup(keybind_str);
+    if (!copy)
+    {
+        LogError("Failed to allocate memory for keybind parsing");
+        return 0;
+    }
+
     char *token = strtok(copy, "+");
+    int key_found = 0;
 
-    while (token) {
-        if (strcasecmp(token, "Alt") == 0) {
+    while (token)
+    {
+        if (strcasecmp(token, "Alt") == 0)
+        {
             *mod_mask |= Mod1Mask;
-        } else if (strcasecmp(token, "Ctrl") == 0 || strcasecmp(token, "Control") == 0) {
+        }
+        else if (strcasecmp(token, "Ctrl") == 0 || strcasecmp(token, "Control") == 0)
+        {
             *mod_mask |= ControlMask;
-        } else if (strcasecmp(token, "Shift") == 0) {
+        }
+        else if (strcasecmp(token, "Shift") == 0)
+        {
             *mod_mask |= ShiftMask;
-        } else if (strcasecmp(token, "Super") == 0 || strcasecmp(token, "Win") == 0) {
+        }
+        else if (strcasecmp(token, "Super") == 0 || strcasecmp(token, "Win") == 0)
+        {
             *mod_mask |= Mod4Mask;
-        } else {
+        }
+        else if (!key_found)
+        {
             strncpy(key_name, token, sizeof(key_name) - 1);
+            key_name[sizeof(key_name) - 1] = '\0';
+            key_found = 1;
         }
         token = strtok(NULL, "+");
     }
 
     free(copy);
 
-    if (!key_name[0]) return 0;
+    if (!key_found)
+    {
+        LogError("No key found in keybind: %s", keybind_str);
+        return 0;
+    }
 
     KeySym keysym = 0;
 
-    if (strcasecmp(key_name, "Return") == 0) keysym = XK_Return;
-    else if (strcasecmp(key_name, "Escape") == 0) keysym = XK_Escape;
-    else if (strcasecmp(key_name, "Space") == 0) keysym = XK_space;
-    else if (strcasecmp(key_name, "Tab") == 0) keysym = XK_Tab;
-    else if (strcasecmp(key_name, "Backspace") == 0) keysym = XK_BackSpace;
-    else if (strcasecmp(key_name, "Delete") == 0) keysym = XK_Delete;
-    else if (strcasecmp(key_name, "Home") == 0) keysym = XK_Home;
-    else if (strcasecmp(key_name, "End") == 0) keysym = XK_End;
-    else if (strcasecmp(key_name, "PageUp") == 0) keysym = XK_Page_Up;
-    else if (strcasecmp(key_name, "PageDown") == 0) keysym = XK_Page_Down;
-    else if (strcasecmp(key_name, "Up") == 0) keysym = XK_Up;
-    else if (strcasecmp(key_name, "Down") == 0) keysym = XK_Down;
-    else if (strcasecmp(key_name, "Left") == 0) keysym = XK_Left;
-    else if (strcasecmp(key_name, "Right") == 0) keysym = XK_Right;
-    else if (strcasecmp(key_name, "F1") == 0) keysym = XK_F1;
-    else if (strcasecmp(key_name, "F2") == 0) keysym = XK_F2;
-    else if (strcasecmp(key_name, "F3") == 0) keysym = XK_F3;
-    else if (strcasecmp(key_name, "F4") == 0) keysym = XK_F4;
-    else if (strcasecmp(key_name, "F5") == 0) keysym = XK_F5;
-    else if (strcasecmp(key_name, "F6") == 0) keysym = XK_F6;
-    else if (strcasecmp(key_name, "F7") == 0) keysym = XK_F7;
-    else if (strcasecmp(key_name, "F8") == 0) keysym = XK_F8;
-    else if (strcasecmp(key_name, "F9") == 0) keysym = XK_F9;
-    else if (strcasecmp(key_name, "F10") == 0) keysym = XK_F10;
-    else if (strcasecmp(key_name, "F11") == 0) keysym = XK_F11;
-    else if (strcasecmp(key_name, "F12") == 0) keysym = XK_F12;
-    else if (strcasecmp(key_name, "bracketleft") == 0) keysym = XK_bracketleft;
-    else if (strcasecmp(key_name, "bracketright") == 0) keysym = XK_bracketright;
-    else {
-        if (strlen(key_name) == 1) {
+    if (strcasecmp(key_name, "Return") == 0)
+        keysym = XK_Return;
+    else if (strcasecmp(key_name, "Escape") == 0)
+        keysym = XK_Escape;
+    else if (strcasecmp(key_name, "Space") == 0)
+        keysym = XK_space;
+    else if (strcasecmp(key_name, "Tab") == 0)
+        keysym = XK_Tab;
+    else if (strcasecmp(key_name, "Backspace") == 0)
+        keysym = XK_BackSpace;
+    else if (strcasecmp(key_name, "Delete") == 0)
+        keysym = XK_Delete;
+    else if (strcasecmp(key_name, "Home") == 0)
+        keysym = XK_Home;
+    else if (strcasecmp(key_name, "End") == 0)
+        keysym = XK_End;
+    else if (strcasecmp(key_name, "PageUp") == 0)
+        keysym = XK_Page_Up;
+    else if (strcasecmp(key_name, "PageDown") == 0)
+        keysym = XK_Page_Down;
+    else if (strcasecmp(key_name, "Up") == 0)
+        keysym = XK_Up;
+    else if (strcasecmp(key_name, "Down") == 0)
+        keysym = XK_Down;
+    else if (strcasecmp(key_name, "Left") == 0)
+        keysym = XK_Left;
+    else if (strcasecmp(key_name, "Right") == 0)
+        keysym = XK_Right;
+    else if (strcasecmp(key_name, "F1") == 0)
+        keysym = XK_F1;
+    else if (strcasecmp(key_name, "F2") == 0)
+        keysym = XK_F2;
+    else if (strcasecmp(key_name, "F3") == 0)
+        keysym = XK_F3;
+    else if (strcasecmp(key_name, "F4") == 0)
+        keysym = XK_F4;
+    else if (strcasecmp(key_name, "F5") == 0)
+        keysym = XK_F5;
+    else if (strcasecmp(key_name, "F6") == 0)
+        keysym = XK_F6;
+    else if (strcasecmp(key_name, "F7") == 0)
+        keysym = XK_F7;
+    else if (strcasecmp(key_name, "F8") == 0)
+        keysym = XK_F8;
+    else if (strcasecmp(key_name, "F9") == 0)
+        keysym = XK_F9;
+    else if (strcasecmp(key_name, "F10") == 0)
+        keysym = XK_F10;
+    else if (strcasecmp(key_name, "F11") == 0)
+        keysym = XK_F11;
+    else if (strcasecmp(key_name, "F12") == 0)
+        keysym = XK_F12;
+    else if (strcasecmp(key_name, "bracketleft") == 0)
+        keysym = XK_bracketleft;
+    else if (strcasecmp(key_name, "bracketright") == 0)
+        keysym = XK_bracketright;
+    else
+    {
+        if (strlen(key_name) == 1)
+        {
             keysym = (KeySym)key_name[0];
-        } else {
+        }
+        else
+        {
             keysym = XStringToKeysym(key_name);
         }
     }
 
-    if (keysym == 0) {
+    if (keysym == 0)
+    {
+        if (strlen(key_name) == 1)
+        {
+            keysym = (KeySym)key_name[0];
+        }
+        else
+        {
+            keysym = XStringToKeysym(key_name);
+        }
+    }
+
+    if (keysym == 0)
+    {
         LogError("Unknown key in keybind: %s", key_name);
         return 0;
     }
 
-    KeyCode keycode = XKeysymToKeycode(state->display, keysym);
-    if (keycode == 0) {
+    keycode = XKeysymToKeycode(state->display, keysym);
+    if (keycode == 0)
+    {
         LogError("Failed to convert keysym to keycode: %s", key_name);
     }
 
     return keycode;
 }
 
-static void InitializeDefaultKeybinds(KeybindConfig *keybinds) {
-    if (!keybinds) return;
-    
+static void InitializeDefaultKeybinds(KeybindConfig *keybinds)
+{
+    if (!keybinds)
+        return;
+
     memset(keybinds, 0, sizeof(KeybindConfig));
-    
+
     keybinds->launch_terminal = strdup("Alt+Return");
     keybinds->close_window = strdup("Alt+q");
     keybinds->toggle_floating = strdup("Alt+f");
@@ -411,15 +510,18 @@ static void InitializeDefaultKeybinds(KeybindConfig *keybinds) {
     keybinds->move_window_next_monitor = strdup("Alt+bracketright");
     keybinds->logout = strdup("Alt+Escape");
 
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < 9; i++)
+    {
         char workspace_key[32];
         snprintf(workspace_key, sizeof(workspace_key), "Alt+%d", i + 1);
         keybinds->switch_workspace[i] = strdup(workspace_key);
     }
 }
 
-static void FreeKeybinds(KeybindConfig *keybinds) {
-    if (!keybinds) return;
+static void FreeKeybinds(KeybindConfig *keybinds)
+{
+    if (!keybinds)
+        return;
 
     SAFE_FREE(keybinds->launch_terminal);
     SAFE_FREE(keybinds->close_window);
@@ -437,7 +539,8 @@ static void FreeKeybinds(KeybindConfig *keybinds) {
     SAFE_FREE(keybinds->move_window_next_monitor);
     SAFE_FREE(keybinds->logout);
 
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < 9; i++)
+    {
         SAFE_FREE(keybinds->switch_workspace[i]);
     }
 }
@@ -449,7 +552,8 @@ static void GrabKeys(GooeyShellState *state)
 
     XUngrabKey(state->display, AnyKey, AnyModifier, state->root);
 
-    typedef struct {
+    typedef struct
+    {
         const char *keybind_str;
         const char *name;
     } KeybindMapping;
@@ -472,10 +576,12 @@ static void GrabKeys(GooeyShellState *state)
         {state->keybinds.logout, "logout"},
     };
 
-    for (int i = 0; i < 9; i++) {
+    for (int i = 0; i < 9; i++)
+    {
         unsigned int mod_mask;
         KeyCode keycode = ParseKeybind(state, state->keybinds.switch_workspace[i], &mod_mask);
-        if (keycode != 0) {
+        if (keycode != 0)
+        {
             XGrabKey(state->display, keycode, mod_mask, state->root, True, GrabModeAsync, GrabModeAsync);
             XGrabKey(state->display, keycode, mod_mask | LockMask, state->root, True, GrabModeAsync, GrabModeAsync);
             XGrabKey(state->display, keycode, mod_mask | Mod2Mask, state->root, True, GrabModeAsync, GrabModeAsync);
@@ -483,16 +589,21 @@ static void GrabKeys(GooeyShellState *state)
         }
     }
 
-    for (int i = 0; i < sizeof(keybinds) / sizeof(keybinds[0]); i++) {
-        if (keybinds[i].keybind_str) {
+    for (int i = 0; i < sizeof(keybinds) / sizeof(keybinds[0]); i++)
+    {
+        if (keybinds[i].keybind_str)
+        {
             unsigned int mod_mask;
             KeyCode keycode = ParseKeybind(state, keybinds[i].keybind_str, &mod_mask);
-            if (keycode != 0) {
+            if (keycode != 0)
+            {
                 XGrabKey(state->display, keycode, mod_mask, state->root, True, GrabModeAsync, GrabModeAsync);
                 XGrabKey(state->display, keycode, mod_mask | LockMask, state->root, True, GrabModeAsync, GrabModeAsync);
                 XGrabKey(state->display, keycode, mod_mask | Mod2Mask, state->root, True, GrabModeAsync, GrabModeAsync);
                 XGrabKey(state->display, keycode, mod_mask | LockMask | Mod2Mask, state->root, True, GrabModeAsync, GrabModeAsync);
-            } else {
+            }
+            else
+            {
                 LogError("Failed to parse keybind: %s = %s", keybinds[i].name, keybinds[i].keybind_str);
             }
         }
@@ -515,48 +626,62 @@ static int IsWindowInSubtree(TilingNode *root, WindowNode *target)
     return IsWindowInSubtree(root->left, target) || IsWindowInSubtree(root->right, target);
 }
 
-static TilingNode* findContainingSplit(TilingNode *root, WindowNode *target) {
-    if (!root || root->is_leaf) return NULL;
+static TilingNode *findContainingSplit(TilingNode *root, WindowNode *target)
+{
+    if (!root || root->is_leaf)
+        return NULL;
 
     int in_left = IsWindowInSubtree(root->left, target);
     int in_right = IsWindowInSubtree(root->right, target);
 
-    if (in_left && in_right) {
+    if (in_left && in_right)
+    {
         return NULL;
     }
 
-    if (in_left || in_right) {
+    if (in_left || in_right)
+    {
         return root;
     }
 
     return NULL;
 }
 
-static TilingNode* findVerticalSplitToLeft(TilingNode *root, WindowNode *target) {
-    if (!root || root->is_leaf) return NULL;
+static TilingNode *findVerticalSplitToLeft(TilingNode *root, WindowNode *target)
+{
+    if (!root || root->is_leaf)
+        return NULL;
 
-    if (root->split == SPLIT_VERTICAL) {
-        if (IsWindowInSubtree(root->right, target)) {
+    if (root->split == SPLIT_VERTICAL)
+    {
+        if (IsWindowInSubtree(root->right, target))
+        {
             return root;
         }
     }
 
     TilingNode *found = findVerticalSplitToLeft(root->left, target);
-    if (found) return found;
+    if (found)
+        return found;
     return findVerticalSplitToLeft(root->right, target);
 }
 
-static TilingNode* findVerticalSplitToRight(TilingNode *root, WindowNode *target) {
-    if (!root || root->is_leaf) return NULL;
+static TilingNode *findVerticalSplitToRight(TilingNode *root, WindowNode *target)
+{
+    if (!root || root->is_leaf)
+        return NULL;
 
-    if (root->split == SPLIT_VERTICAL) {
-        if (IsWindowInSubtree(root->left, target)) {
+    if (root->split == SPLIT_VERTICAL)
+    {
+        if (IsWindowInSubtree(root->left, target))
+        {
             return root;
         }
     }
 
     TilingNode *found = findVerticalSplitToRight(root->left, target);
-    if (found) return found;
+    if (found)
+        return found;
     return findVerticalSplitToRight(root->right, target);
 }
 
@@ -721,9 +846,10 @@ static int ValidateWindowState(GooeyShellState *state)
     }
     return 1;
 }
-
 static void AddToOpenedWindows(Window window)
 {
+    glps_thread_mutex_lock(&window_list_mutex);
+
     if (opened_windows_count >= opened_windows_capacity)
     {
         int new_capacity = opened_windows_capacity == 0 ? 16 : opened_windows_capacity * 2;
@@ -731,6 +857,7 @@ static void AddToOpenedWindows(Window window)
         if (!new_array)
         {
             LogError("Failed to realloc opened_windows");
+            glps_thread_mutex_unlock(&window_list_mutex);
             return;
         }
         opened_windows = new_array;
@@ -738,10 +865,12 @@ static void AddToOpenedWindows(Window window)
     }
 
     opened_windows[opened_windows_count++] = window;
+    glps_thread_mutex_unlock(&window_list_mutex);
 }
-
 static void RemoveFromOpenedWindows(Window window)
 {
+    glps_thread_mutex_lock(&window_list_mutex);
+
     for (int i = 0; i < opened_windows_count; i++)
     {
         if (opened_windows[i] == window)
@@ -751,23 +880,29 @@ static void RemoveFromOpenedWindows(Window window)
                 opened_windows[j] = opened_windows[j + 1];
             }
             opened_windows_count--;
-            return;
+            break;
         }
     }
-}
 
+    glps_thread_mutex_unlock(&window_list_mutex);
+}
 static int IsWindowInOpenedWindows(Window window)
 {
+    glps_thread_mutex_lock(&window_list_mutex);
+    int found = 0;
+
     for (int i = 0; i < opened_windows_count; i++)
     {
         if (opened_windows[i] == window)
         {
-            return 1;
+            found = 1;
+            break;
         }
     }
-    return 0;
-}
 
+    glps_thread_mutex_unlock(&window_list_mutex);
+    return found;
+}
 static void InitializeAtoms(Display *display)
 {
     atoms.net_wm_name = XInternAtom(display, "_NET_WM_NAME", False);
@@ -803,7 +938,8 @@ static int InitializeMultiMonitor(GooeyShellState *state)
     if (!XRRQueryExtension(state->display, &event_base, &error_base))
     {
         state->monitor_info.monitors = malloc(sizeof(Monitor));
-        if (!state->monitor_info.monitors) {
+        if (!state->monitor_info.monitors)
+        {
             LogError("Failed to allocate monitor info");
             return 0;
         }
@@ -826,12 +962,13 @@ static int InitializeMultiMonitor(GooeyShellState *state)
     }
 
     state->monitor_info.monitors = malloc(sizeof(Monitor) * resources->noutput);
-    if (!state->monitor_info.monitors) {
+    if (!state->monitor_info.monitors)
+    {
         XRRFreeScreenResources(resources);
         LogError("Failed to allocate monitors");
         return 0;
     }
-    
+
     state->monitor_info.num_monitors = 0;
     state->monitor_info.primary_monitor = 0;
 
@@ -871,7 +1008,8 @@ static int InitializeMultiMonitor(GooeyShellState *state)
     {
         free(state->monitor_info.monitors);
         state->monitor_info.monitors = malloc(sizeof(Monitor));
-        if (!state->monitor_info.monitors) {
+        if (!state->monitor_info.monitors)
+        {
             LogError("Failed to allocate fallback monitor");
             return 0;
         }
@@ -942,19 +1080,23 @@ static int GetMonitorForWindow(GooeyShellState *state, int x, int y, int width, 
     return best_monitor;
 }
 
-static int GetCurrentMonitor(GooeyShellState *state) {
+static int GetCurrentMonitor(GooeyShellState *state)
+{
     if (!state || state->monitor_info.num_monitors == 0)
         return 0;
 
-    if (state->focused_window != None) {
+    if (state->focused_window != None)
+    {
         WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
-        if (node && node->monitor_number >= 0 && 
-            node->monitor_number < state->monitor_info.num_monitors) {
+        if (node && node->monitor_number >= 0 &&
+            node->monitor_number < state->monitor_info.num_monitors)
+        {
             return node->monitor_number;
         }
     }
 
-    if (state->focused_monitor >= 0 && state->focused_monitor < state->monitor_info.num_monitors) {
+    if (state->focused_monitor >= 0 && state->focused_monitor < state->monitor_info.num_monitors)
+    {
         return state->focused_monitor;
     }
 
@@ -1007,7 +1149,7 @@ static void MoveWindowToMonitor(GooeyShellState *state, WindowNode *node, int mo
     if (node->monitor_number == monitor_number)
         return;
 
-    LogInfo("Moving window '%s' from monitor %d to monitor %d", 
+    LogInfo("Moving window '%s' from monitor %d to monitor %d",
             node->title ? node->title : "unknown", node->monitor_number, monitor_number);
 
     int old_monitor = node->monitor_number;
@@ -1019,9 +1161,11 @@ static void MoveWindowToMonitor(GooeyShellState *state, WindowNode *node, int mo
         node->x = mon->x + (mon->width - node->width) / 2;
         node->y = mon->y + BAR_HEIGHT + (mon->height - BAR_HEIGHT - node->height) / 2;
 
-        if (node->x < mon->x) node->x = mon->x;
-        if (node->y < mon->y + BAR_HEIGHT) node->y = mon->y + BAR_HEIGHT;
-        if (node->x + node->width > mon->x + mon->width) 
+        if (node->x < mon->x)
+            node->x = mon->x;
+        if (node->y < mon->y + BAR_HEIGHT)
+            node->y = mon->y + BAR_HEIGHT;
+        if (node->x + node->width > mon->x + mon->width)
             node->x = mon->x + mon->width - node->width;
         if (node->y + node->height > mon->y + mon->height)
             node->y = mon->y + mon->height - node->height;
@@ -1030,8 +1174,10 @@ static void MoveWindowToMonitor(GooeyShellState *state, WindowNode *node, int mo
     UpdateWindowGeometry(state, node);
 
     Workspace *ws = GetCurrentWorkspace(state);
-    if (ws) {
-        if (old_monitor >= 0 && old_monitor < state->monitor_info.num_monitors) {
+    if (ws)
+    {
+        if (old_monitor >= 0 && old_monitor < state->monitor_info.num_monitors)
+        {
             ArrangeWindowsTilingOnMonitor(state, ws, old_monitor);
         }
         ArrangeWindowsTilingOnMonitor(state, ws, monitor_number);
@@ -1047,7 +1193,7 @@ static void SetWindowOpacity(GooeyShellState *state, Window window, float opacit
 
     XChangeProperty(state->display, window, atoms.net_wm_window_opacity,
                     XA_CARDINAL, 32, PropModeReplace,
-                    (unsigned char*)&opacity_value, 1);
+                    (unsigned char *)&opacity_value, 1);
 }
 
 static Atom GetOpacityAtom(GooeyShellState *state)
@@ -1072,11 +1218,12 @@ static void InitializeTransparency(GooeyShellState *state)
 static void InitializeWorkspaces(GooeyShellState *state)
 {
     state->workspaces = malloc(sizeof(Workspace));
-    if (!state->workspaces) {
+    if (!state->workspaces)
+    {
         LogError("Failed to allocate workspace");
         return;
     }
-    
+
     state->workspaces->number = 1;
     state->workspaces->layout = LAYOUT_TILING;
     state->workspaces->windows = NULL;
@@ -1086,8 +1233,9 @@ static void InitializeWorkspaces(GooeyShellState *state)
     state->workspaces->stack_ratios_count = 0;
 
     state->workspaces->monitor_tiling_roots_count = state->monitor_info.num_monitors;
-    state->workspaces->monitor_tiling_roots = calloc(state->monitor_info.num_monitors, sizeof(TilingNode*));
-    if (!state->workspaces->monitor_tiling_roots) {
+    state->workspaces->monitor_tiling_roots = calloc(state->monitor_info.num_monitors, sizeof(TilingNode *));
+    if (!state->workspaces->monitor_tiling_roots)
+    {
         LogError("Failed to allocate monitor tiling roots");
         free(state->workspaces);
         state->workspaces = NULL;
@@ -1134,11 +1282,12 @@ static Workspace *GetWorkspace(GooeyShellState *state, int workspace_number)
 static Workspace *CreateWorkspace(GooeyShellState *state, int workspace_number)
 {
     Workspace *new_ws = malloc(sizeof(Workspace));
-    if (!new_ws) {
+    if (!new_ws)
+    {
         LogError("Failed to allocate new workspace");
         return NULL;
     }
-    
+
     new_ws->number = workspace_number;
     new_ws->layout = LAYOUT_TILING;
     new_ws->windows = NULL;
@@ -1148,8 +1297,9 @@ static Workspace *CreateWorkspace(GooeyShellState *state, int workspace_number)
     new_ws->stack_ratios_count = 0;
 
     new_ws->monitor_tiling_roots_count = state->monitor_info.num_monitors;
-    new_ws->monitor_tiling_roots = calloc(state->monitor_info.num_monitors, sizeof(TilingNode*));
-    if (!new_ws->monitor_tiling_roots) {
+    new_ws->monitor_tiling_roots = calloc(state->monitor_info.num_monitors, sizeof(TilingNode *));
+    if (!new_ws->monitor_tiling_roots)
+    {
         LogError("Failed to allocate monitor tiling roots for new workspace");
         free(new_ws);
         return NULL;
@@ -1178,7 +1328,8 @@ static void AddWindowToWorkspace(GooeyShellState *state, WindowNode *node, int w
     if (!ws)
     {
         ws = CreateWorkspace(state, workspace);
-        if (!ws) return;
+        if (!ws)
+            return;
     }
 
     node->workspace = workspace;
@@ -1214,12 +1365,40 @@ static void RemoveWindowFromWorkspace(GooeyShellState *state, WindowNode *node)
     node->prev = NULL;
     node->next = NULL;
 }
+static void TilingNodeRef(TilingNode *node)
+{
+    if (node)
+    {
+        node->ref_count++;
+    }
+}
+static void TilingNodeUnref(TilingNode *node)
+{
+    if (node && --node->ref_count <= 0)
+    {
+        FreeTilingTree(node->left);
+        FreeTilingTree(node->right);
+        free(node);
+    }
+}
+static void FreeTilingTree(TilingNode *root)
+{
+    if (!root)
+        return;
+
+    // Use reference counting to safely free
+    TilingNodeUnref(root);
+}
 
 static TilingNode *CreateTilingNode(WindowNode *window, int x, int y, int width, int height)
 {
-    TilingNode *node = malloc(sizeof(TilingNode));
-    if (!node) return NULL;
-    
+    TilingNode *node = calloc(1, sizeof(TilingNode));
+    if (!node)
+    {
+        LogError("Failed to allocate tiling node");
+        return NULL;
+    }
+
     node->window = window;
     node->left = NULL;
     node->right = NULL;
@@ -1231,17 +1410,11 @@ static TilingNode *CreateTilingNode(WindowNode *window, int x, int y, int width,
     node->ratio = 0.5f;
     node->split = SPLIT_NONE;
     node->is_leaf = (window != NULL);
+    node->ref_count = 1;
     return node;
 }
 
-static void FreeTilingTree(TilingNode *root)
-{
-    if (!root)
-        return;
-    FreeTilingTree(root->left);
-    FreeTilingTree(root->right);
-    free(root);
-}
+
 
 static SplitDirection ChooseSplitDirection(int width, int height, int window_count)
 {
@@ -1275,7 +1448,8 @@ static TilingNode *BuildTreeRecursive(WindowNode **windows, int count, int x, in
     if (count == 1)
     {
         TilingNode *node = CreateTilingNode(windows[0], x, y, width, height);
-        if (!node) return NULL;
+        if (!node)
+            return NULL;
 
         if (existing_root)
         {
@@ -1302,8 +1476,9 @@ static TilingNode *BuildTreeRecursive(WindowNode **windows, int count, int x, in
     }
 
     TilingNode *node = CreateTilingNode(NULL, x, y, width, height);
-    if (!node) return NULL;
-    
+    if (!node)
+        return NULL;
+
     node->split = ChooseSplitDirection(width, height, count);
 
     if (existing_root)
@@ -1354,10 +1529,10 @@ static TilingNode *BuildTreeRecursive(WindowNode **windows, int count, int x, in
 
     return node;
 }
-
 static void BuildDynamicTilingTreeForMonitor(GooeyShellState *state, Workspace *workspace, int monitor_number)
 {
-    if (monitor_number < 0 || monitor_number >= workspace->monitor_tiling_roots_count) {
+    if (monitor_number < 0 || monitor_number >= workspace->monitor_tiling_roots_count)
+    {
         return;
     }
 
@@ -1367,11 +1542,13 @@ static void BuildDynamicTilingTreeForMonitor(GooeyShellState *state, Workspace *
     int tiled_count = 0;
     WindowNode *node = workspace->windows;
 
+    // Count tiled windows
     while (node)
     {
         if (!node->is_floating && !node->is_fullscreen && !node->is_minimized &&
             !node->is_desktop_app && !node->is_fullscreen_app &&
-            node->monitor_number == monitor_number) {
+            node->monitor_number == monitor_number)
+        {
             tiled_count++;
         }
         node = node->next;
@@ -1380,17 +1557,21 @@ static void BuildDynamicTilingTreeForMonitor(GooeyShellState *state, Workspace *
     if (tiled_count == 0)
     {
         if (old_root)
-            FreeTilingTree(old_root);
-        workspace->monitor_tiling_roots[monitor_number] = NULL;
+        {
+            // Don't free immediately, let reference counting handle it
+            workspace->monitor_tiling_roots[monitor_number] = NULL;
+            TilingNodeUnref(old_root);
+        }
         return;
     }
 
     tiled_windows = malloc(sizeof(WindowNode *) * tiled_count);
-    if (!tiled_windows) {
+    if (!tiled_windows)
+    {
         LogError("Failed to allocate tiled windows array");
         return;
     }
-    
+
     node = workspace->windows;
     int index = 0;
 
@@ -1398,7 +1579,8 @@ static void BuildDynamicTilingTreeForMonitor(GooeyShellState *state, Workspace *
     {
         if (!node->is_floating && !node->is_fullscreen && !node->is_minimized &&
             !node->is_desktop_app && !node->is_fullscreen_app &&
-            node->monitor_number == monitor_number) {
+            node->monitor_number == monitor_number)
+        {
             tiled_windows[index++] = node;
         }
         node = node->next;
@@ -1410,17 +1592,26 @@ static void BuildDynamicTilingTreeForMonitor(GooeyShellState *state, Workspace *
     int usable_x = mon->x + state->outer_gap;
     int usable_y = mon->y + state->outer_gap + BAR_HEIGHT;
 
-    workspace->monitor_tiling_roots[monitor_number] = 
-        BuildTreeRecursive(tiled_windows, tiled_count, usable_x, usable_y, usable_width, usable_height, old_root);
+    TilingNode *new_root = BuildTreeRecursive(tiled_windows, tiled_count, usable_x, usable_y, usable_width, usable_height, old_root);
 
+    if (new_root)
+    {
+        workspace->monitor_tiling_roots[monitor_number] = new_root;
+    }
+
+    // Safe cleanup of old root
     if (old_root)
-        FreeTilingTree(old_root);
+    {
+        TilingNodeUnref(old_root);
+    }
+
     free(tiled_windows);
 }
 
 static void BuildDynamicTilingTree(GooeyShellState *state, Workspace *workspace)
 {
-    for (int i = 0; i < workspace->monitor_tiling_roots_count; i++) {
+    for (int i = 0; i < workspace->monitor_tiling_roots_count; i++)
+    {
         BuildDynamicTilingTreeForMonitor(state, workspace, i);
     }
 }
@@ -1465,7 +1656,8 @@ static void ArrangeWindowsTilingOnMonitor(GooeyShellState *state, Workspace *wor
 
 static void ArrangeWindowsTiling(GooeyShellState *state, Workspace *workspace)
 {
-    for (int i = 0; i < workspace->monitor_tiling_roots_count; i++) {
+    for (int i = 0; i < workspace->monitor_tiling_roots_count; i++)
+    {
         ArrangeWindowsTilingOnMonitor(state, workspace, i);
     }
 }
@@ -1507,7 +1699,8 @@ static void ArrangeWindowsMonocleOnMonitor(GooeyShellState *state, Workspace *wo
 
 static void ArrangeWindowsMonocle(GooeyShellState *state, Workspace *workspace)
 {
-    for (int i = 0; i < state->monitor_info.num_monitors; i++) {
+    for (int i = 0; i < state->monitor_info.num_monitors; i++)
+    {
         ArrangeWindowsMonocleOnMonitor(state, workspace, i);
     }
 }
@@ -1551,31 +1744,39 @@ static int GetTilingResizeArea(GooeyShellState *state, WindowNode *node, int x, 
 static void HandleTilingResize(GooeyShellState *state, WindowNode *node, int resize_edge, int delta_x, int delta_y)
 {
     Workspace *workspace = GetCurrentWorkspace(state);
-    if (!workspace || !workspace->monitor_tiling_roots) return;
+    if (!workspace || !workspace->monitor_tiling_roots)
+        return;
 
-    typedef struct {
+    typedef struct
+    {
         TilingNode *split;
-        int is_left_child; 
+        int is_left_child;
     } SplitInfo;
 
-    SplitInfo splits[32]; 
+    SplitInfo splits[32];
     int split_count = 0;
 
-    void collectSplits(TilingNode *current, WindowNode *target) {
-        if (!current || current->is_leaf) return;
+    void collectSplits(TilingNode * current, WindowNode * target)
+    {
+        if (!current || current->is_leaf)
+            return;
 
         int in_left = IsWindowInSubtree(current->left, target);
         int in_right = IsWindowInSubtree(current->right, target);
 
-        if (in_left || in_right) {
-            if (split_count < 32) {
+        if (in_left || in_right)
+        {
+            if (split_count < 32)
+            {
                 splits[split_count].split = current;
                 splits[split_count].is_left_child = in_left ? 1 : 0;
                 split_count++;
             }
 
-            if (in_left) collectSplits(current->left, target);
-            if (in_right) collectSplits(current->right, target);
+            if (in_left)
+                collectSplits(current->left, target);
+            if (in_right)
+                collectSplits(current->right, target);
         }
     }
 
@@ -1583,25 +1784,34 @@ static void HandleTilingResize(GooeyShellState *state, WindowNode *node, int res
     TilingNode *monitor_root = workspace->monitor_tiling_roots[node->monitor_number];
     collectSplits(monitor_root, node);
 
-    if (split_count == 0) return;
+    if (split_count == 0)
+        return;
 
     TilingNode *target_split = NULL;
     float sensitivity = 0.03f;
 
-    for (int i = 0; i < split_count; i++) {
+    for (int i = 0; i < split_count; i++)
+    {
         TilingNode *split = splits[i].split;
         int is_left = splits[i].is_left_child;
 
-        if (resize_edge == 1) { 
-            if (split->split == SPLIT_VERTICAL) {
-                if ((is_left && delta_x > 0) || (!is_left && delta_x < 0)) {
+        if (resize_edge == 1)
+        {
+            if (split->split == SPLIT_VERTICAL)
+            {
+                if ((is_left && delta_x > 0) || (!is_left && delta_x < 0))
+                {
                     target_split = split;
                     break;
                 }
             }
-        } else if (resize_edge == 2) { 
-            if (split->split == SPLIT_HORIZONTAL) {
-                if ((is_left && delta_y > 0) || (!is_left && delta_y < 0)) {
+        }
+        else if (resize_edge == 2)
+        {
+            if (split->split == SPLIT_HORIZONTAL)
+            {
+                if ((is_left && delta_y > 0) || (!is_left && delta_y < 0))
+                {
                     target_split = split;
                     break;
                 }
@@ -1609,22 +1819,28 @@ static void HandleTilingResize(GooeyShellState *state, WindowNode *node, int res
         }
     }
 
-    if (!target_split) {
-        for (int i = 0; i < split_count; i++) {
+    if (!target_split)
+    {
+        for (int i = 0; i < split_count; i++)
+        {
             TilingNode *split = splits[i].split;
             if ((resize_edge == 1 && split->split == SPLIT_VERTICAL) ||
-                (resize_edge == 2 && split->split == SPLIT_HORIZONTAL)) {
+                (resize_edge == 2 && split->split == SPLIT_HORIZONTAL))
+            {
                 target_split = split;
                 break;
             }
         }
     }
 
-    if (!target_split) return;
+    if (!target_split)
+        return;
 
     int is_left = 0;
-    for (int i = 0; i < split_count; i++) {
-        if (splits[i].split == target_split) {
+    for (int i = 0; i < split_count; i++)
+    {
+        if (splits[i].split == target_split)
+        {
             is_left = splits[i].is_left_child;
             break;
         }
@@ -1632,18 +1848,23 @@ static void HandleTilingResize(GooeyShellState *state, WindowNode *node, int res
 
     int direction = is_left ? 1 : -1;
 
-    if (resize_edge == 1 && target_split->split == SPLIT_VERTICAL) {
+    if (resize_edge == 1 && target_split->split == SPLIT_VERTICAL)
+    {
         target_split->ratio += direction * (float)delta_x / target_split->width * sensitivity;
-    } else if (resize_edge == 2 && target_split->split == SPLIT_HORIZONTAL) {
+    }
+    else if (resize_edge == 2 && target_split->split == SPLIT_HORIZONTAL)
+    {
         target_split->ratio += direction * (float)delta_y / target_split->height * sensitivity;
     }
 
-    if (target_split->ratio < 0.1f) target_split->ratio = 0.1f;
-    if (target_split->ratio > 0.9f) target_split->ratio = 0.9f;
+    if (target_split->ratio < 0.1f)
+        target_split->ratio = 0.1f;
+    if (target_split->ratio > 0.9f)
+        target_split->ratio = 0.9f;
 
-    LogInfo("Resizing split: %s, ratio: %.2f, direction: %d", 
-           target_split->split == SPLIT_VERTICAL ? "vertical" : "horizontal",
-           target_split->ratio, direction);
+    LogInfo("Resizing split: %s, ratio: %.2f, direction: %d",
+            target_split->split == SPLIT_VERTICAL ? "vertical" : "horizontal",
+            target_split->ratio, direction);
 
     TileWindowsOnWorkspace(state, workspace);
 }
@@ -1696,7 +1917,8 @@ static void FocusWindow(GooeyShellState *state, WindowNode *node)
     if (state->focused_window != None && state->focused_window != node->frame)
     {
         WindowNode *prev_node = FindWindowNodeByFrame(state, state->focused_window);
-        if (prev_node) {
+        if (prev_node)
+        {
             XSetWindowBorder(state->display, prev_node->frame, state->border_color);
             if (!prev_node->is_titlebar_disabled)
             {
@@ -1737,11 +1959,14 @@ static void FocusRootWindow(GooeyShellState *state)
     if (!ValidateWindowState(state))
         return;
 
-    if (state->focused_window != None) {
+    if (state->focused_window != None)
+    {
         WindowNode *prev_node = FindWindowNodeByFrame(state, state->focused_window);
-        if (prev_node) {
+        if (prev_node)
+        {
             XSetWindowBorder(state->display, prev_node->frame, state->border_color);
-            if (!prev_node->is_titlebar_disabled) {
+            if (!prev_node->is_titlebar_disabled)
+            {
                 DrawTitleBar(state, prev_node);
             }
         }
@@ -2004,8 +2229,10 @@ void GooeyShell_FocusNextMonitor(GooeyShellState *state)
     state->focused_monitor = next_monitor;
 
     WindowNode *node = state->window_list;
-    while (node) {
-        if (node->monitor_number == next_monitor && !node->is_minimized) {
+    while (node)
+    {
+        if (node->monitor_number == next_monitor && !node->is_minimized)
+        {
             FocusWindow(state, node);
             break;
         }
@@ -2024,8 +2251,10 @@ void GooeyShell_FocusPreviousMonitor(GooeyShellState *state)
     state->focused_monitor = prev_monitor;
 
     WindowNode *node = state->window_list;
-    while (node) {
-        if (node->monitor_number == prev_monitor && !node->is_minimized) {
+    while (node)
+    {
+        if (node->monitor_number == prev_monitor && !node->is_minimized)
+        {
             FocusWindow(state, node);
             break;
         }
@@ -2121,35 +2350,44 @@ static void HandleMouseFocus(GooeyShellState *state, XMotionEvent *ev)
     int root_x, root_y, win_x, win_y;
     unsigned int mask;
 
-    if (XQueryPointer(state->display, state->root, &root, &child, 
-                     &root_x, &root_y, &win_x, &win_y, &mask)) {
-        if (child != None && child != state->root) {
+    if (XQueryPointer(state->display, state->root, &root, &child,
+                      &root_x, &root_y, &win_x, &win_y, &mask))
+    {
+        if (child != None && child != state->root)
+        {
             WindowNode *node = FindWindowNodeByFrame(state, child);
-            if (!node) {
+            if (!node)
+            {
                 node = FindWindowNodeByClient(state, child);
             }
 
-            if (node && node->frame != state->focused_window && 
+            if (node && node->frame != state->focused_window &&
                 !node->is_desktop_app && !node->is_fullscreen_app &&
-                !node->is_minimized) {
+                !node->is_minimized)
+            {
                 FocusWindow(state, node);
             }
         }
     }
 }
 
-static char* ExpandPath(const char* path) {
-    if (!path) return NULL;
-    
-    if (path[0] == '~') {
-        const char* home = getenv("HOME");
-        if (!home) {
-            struct passwd* pw = getpwuid(getuid());
+static char *ExpandPath(const char *path)
+{
+    if (!path)
+        return NULL;
+
+    if (path[0] == '~')
+    {
+        const char *home = getenv("HOME");
+        if (!home)
+        {
+            struct passwd *pw = getpwuid(getuid());
             home = pw ? pw->pw_dir : "";
         }
 
-        char* expanded = malloc(strlen(home) + strlen(path) + 1);
-        if (expanded) {
+        char *expanded = malloc(strlen(home) + strlen(path) + 1);
+        if (expanded)
+        {
             strcpy(expanded, home);
             strcat(expanded, path + 1);
             return expanded;
@@ -2158,30 +2396,43 @@ static char* ExpandPath(const char* path) {
     return strdup(path);
 }
 
-static int ParseColor(const char* color_str) {
-    if (!color_str) return 0x2196F3;
+static int ParseColor(const char *color_str)
+{
+    if (!color_str)
+        return 0x2196F3;
 
-    if (color_str[0] == '#') {
+    if (color_str[0] == '#')
+    {
         unsigned int color;
-        if (sscanf(color_str + 1, "%x", &color) == 1) {
+        if (sscanf(color_str + 1, "%x", &color) == 1)
+        {
             return (int)color;
         }
     }
 
-    if (strcmp(color_str, "material_blue") == 0) return 0x2196F3;
-    if (strcmp(color_str, "red") == 0) return 0xFF0000;
-    if (strcmp(color_str, "green") == 0) return 0x00FF00;
-    if (strcmp(color_str, "blue") == 0) return 0x0000FF;
-    if (strcmp(color_str, "white") == 0) return 0xFFFFFF;
-    if (strcmp(color_str, "black") == 0) return 0x000000;
-    if (strcmp(color_str, "gray") == 0) return 0x808080;
+    if (strcmp(color_str, "material_blue") == 0)
+        return 0x2196F3;
+    if (strcmp(color_str, "red") == 0)
+        return 0xFF0000;
+    if (strcmp(color_str, "green") == 0)
+        return 0x00FF00;
+    if (strcmp(color_str, "blue") == 0)
+        return 0x0000FF;
+    if (strcmp(color_str, "white") == 0)
+        return 0xFFFFFF;
+    if (strcmp(color_str, "black") == 0)
+        return 0x000000;
+    if (strcmp(color_str, "gray") == 0)
+        return 0x808080;
 
     return 0x2196F3;
 }
 
-static void CreateDefaultConfig(const char* config_path) {
-    FILE* file = fopen(config_path, "w");
-    if (!file) {
+static void CreateDefaultConfig(const char *config_path)
+{
+    FILE *file = fopen(config_path, "w");
+    if (!file)
+    {
         LogError("Failed to create config file: %s", config_path);
         return;
     }
@@ -2248,13 +2499,16 @@ static void CreateDefaultConfig(const char* config_path) {
     LogInfo("Created default config file: %s", config_path);
 }
 
-static int KeybindMatches(GooeyShellState *state, XKeyEvent *ev, const char *keybind_str) {
+static int KeybindMatches(GooeyShellState *state, XKeyEvent *ev, const char *keybind_str)
+{
     unsigned int expected_mod_mask;
     KeyCode expected_keycode = ParseKeybind(state, keybind_str, &expected_mod_mask);
 
-    if (expected_keycode == 0) return 0;
+    if (expected_keycode == 0)
+        return 0;
 
-    if (ev->keycode != expected_keycode) return 0;
+    if (ev->keycode != expected_keycode)
+        return 0;
 
     unsigned int actual_mod_mask = ev->state & ~(LockMask | Mod2Mask);
     unsigned int clean_expected_mod_mask = expected_mod_mask & ~(LockMask | Mod2Mask);
@@ -2262,137 +2516,167 @@ static int KeybindMatches(GooeyShellState *state, XKeyEvent *ev, const char *key
     return (actual_mod_mask == clean_expected_mod_mask);
 }
 
-int GooeyShell_LoadConfig(GooeyShellState *state, const char* config_path) {
-    char* expanded_path = ExpandPath(config_path);
-    if (!expanded_path) {
+int GooeyShell_LoadConfig(GooeyShellState *state, const char *config_path)
+{
+    char *expanded_path = ExpandPath(config_path);
+    if (!expanded_path)
+    {
         return 0;
     }
 
-    char* config_dir = strdup(expanded_path);
-    char* last_slash = strrchr(config_dir, '/');
-    if (last_slash) {
+    char *config_dir = strdup(expanded_path);
+    char *last_slash = strrchr(config_dir, '/');
+    if (last_slash)
+    {
         *last_slash = '\0';
         mkdir(config_dir, 0755);
     }
     free(config_dir);
 
-    if (access(expanded_path, F_OK) != 0) {
+    if (access(expanded_path, F_OK) != 0)
+    {
         CreateDefaultConfig(expanded_path);
     }
 
-    FILE* file = fopen(expanded_path, "r");
-    if (!file) {
+    FILE *file = fopen(expanded_path, "r");
+    if (!file)
+    {
         free(expanded_path);
         return 0;
     }
 
     char line[256];
-    while (fgets(line, sizeof(line), file)) {
-        if (line[0] == '#' || line[0] == '\n') continue;
+    while (fgets(line, sizeof(line), file))
+    {
+        if (line[0] == '#' || line[0] == '\n')
+            continue;
 
-        char* key = strtok(line, " =");
-        char* value = strtok(NULL, " =\n");
+        char *key = strtok(line, " =");
+        char *value = strtok(NULL, " =\n");
 
-        if (!key || !value) continue;
+        if (!key || !value)
+            continue;
 
-        if (strcmp(key, "focused_border_color") == 0) {
+        if (strcmp(key, "focused_border_color") == 0)
+        {
             state->focused_border_color = ParseColor(value);
             LogInfo("Config: focused_border_color = %s (0x%06X)", value, state->focused_border_color);
         }
-        else if (strcmp(key, "logout_command") == 0) {
+        else if (strcmp(key, "logout_command") == 0)
+        {
             free(state->logout_command);
             state->logout_command = strdup(value);
             LogInfo("Config: logout_command = %s", value);
         }
-        else if (strcmp(key, "inner_gap") == 0) {
+        else if (strcmp(key, "inner_gap") == 0)
+        {
             state->inner_gap = atoi(value);
             LogInfo("Config: inner_gap = %d", state->inner_gap);
         }
-        else if (strcmp(key, "outer_gap") == 0) {
+        else if (strcmp(key, "outer_gap") == 0)
+        {
             state->outer_gap = atoi(value);
             LogInfo("Config: outer_gap = %d", state->outer_gap);
         }
-        else if (strncmp(key, "keybind.", 8) == 0) {
-            const char* keybind_name = key + 8;
+        else if (strncmp(key, "keybind.", 8) == 0)
+        {
+            const char *keybind_name = key + 8;
 
-            if (strcmp(keybind_name, "launch_terminal") == 0) {
+            if (strcmp(keybind_name, "launch_terminal") == 0)
+            {
                 free(state->keybinds.launch_terminal);
                 state->keybinds.launch_terminal = strdup(value);
                 LogInfo("Config: keybind.launch_terminal = %s", value);
             }
-            else if (strcmp(keybind_name, "close_window") == 0) {
+            else if (strcmp(keybind_name, "close_window") == 0)
+            {
                 free(state->keybinds.close_window);
                 state->keybinds.close_window = strdup(value);
                 LogInfo("Config: keybind.close_window = %s", value);
             }
-            else if (strcmp(keybind_name, "toggle_floating") == 0) {
+            else if (strcmp(keybind_name, "toggle_floating") == 0)
+            {
                 free(state->keybinds.toggle_floating);
                 state->keybinds.toggle_floating = strdup(value);
                 LogInfo("Config: keybind.toggle_floating = %s", value);
             }
-            else if (strcmp(keybind_name, "focus_next_window") == 0) {
+            else if (strcmp(keybind_name, "focus_next_window") == 0)
+            {
                 free(state->keybinds.focus_next_window);
                 state->keybinds.focus_next_window = strdup(value);
                 LogInfo("Config: keybind.focus_next_window = %s", value);
             }
-            else if (strcmp(keybind_name, "focus_previous_window") == 0) {
+            else if (strcmp(keybind_name, "focus_previous_window") == 0)
+            {
                 free(state->keybinds.focus_previous_window);
                 state->keybinds.focus_previous_window = strdup(value);
                 LogInfo("Config: keybind.focus_previous_window = %s", value);
             }
-            else if (strcmp(keybind_name, "set_tiling_layout") == 0) {
+            else if (strcmp(keybind_name, "set_tiling_layout") == 0)
+            {
                 free(state->keybinds.set_tiling_layout);
                 state->keybinds.set_tiling_layout = strdup(value);
                 LogInfo("Config: keybind.set_tiling_layout = %s", value);
             }
-            else if (strcmp(keybind_name, "set_monocle_layout") == 0) {
+            else if (strcmp(keybind_name, "set_monocle_layout") == 0)
+            {
                 free(state->keybinds.set_monocle_layout);
                 state->keybinds.set_monocle_layout = strdup(value);
                 LogInfo("Config: keybind.set_monocle_layout = %s", value);
             }
-            else if (strcmp(keybind_name, "shrink_width") == 0) {
+            else if (strcmp(keybind_name, "shrink_width") == 0)
+            {
                 free(state->keybinds.shrink_width);
                 state->keybinds.shrink_width = strdup(value);
                 LogInfo("Config: keybind.shrink_width = %s", value);
             }
-            else if (strcmp(keybind_name, "grow_width") == 0) {
+            else if (strcmp(keybind_name, "grow_width") == 0)
+            {
                 free(state->keybinds.grow_width);
                 state->keybinds.grow_width = strdup(value);
                 LogInfo("Config: keybind.grow_width = %s", value);
             }
-            else if (strcmp(keybind_name, "shrink_height") == 0) {
+            else if (strcmp(keybind_name, "shrink_height") == 0)
+            {
                 free(state->keybinds.shrink_height);
                 state->keybinds.shrink_height = strdup(value);
                 LogInfo("Config: keybind.shrink_height = %s", value);
             }
-            else if (strcmp(keybind_name, "grow_height") == 0) {
+            else if (strcmp(keybind_name, "grow_height") == 0)
+            {
                 free(state->keybinds.grow_height);
                 state->keybinds.grow_height = strdup(value);
                 LogInfo("Config: keybind.grow_height = %s", value);
             }
-            else if (strcmp(keybind_name, "toggle_layout") == 0) {
+            else if (strcmp(keybind_name, "toggle_layout") == 0)
+            {
                 free(state->keybinds.toggle_layout);
                 state->keybinds.toggle_layout = strdup(value);
                 LogInfo("Config: keybind.toggle_layout = %s", value);
             }
-            else if (strcmp(keybind_name, "move_window_prev_monitor") == 0) {
+            else if (strcmp(keybind_name, "move_window_prev_monitor") == 0)
+            {
                 free(state->keybinds.move_window_prev_monitor);
                 state->keybinds.move_window_prev_monitor = strdup(value);
                 LogInfo("Config: keybind.move_window_prev_monitor = %s", value);
             }
-            else if (strcmp(keybind_name, "move_window_next_monitor") == 0) {
+            else if (strcmp(keybind_name, "move_window_next_monitor") == 0)
+            {
                 free(state->keybinds.move_window_next_monitor);
                 state->keybinds.move_window_next_monitor = strdup(value);
                 LogInfo("Config: keybind.move_window_next_monitor = %s", value);
             }
-            else if (strcmp(keybind_name, "logout") == 0) {
+            else if (strcmp(keybind_name, "logout") == 0)
+            {
                 free(state->keybinds.logout);
                 state->keybinds.logout = strdup(value);
                 LogInfo("Config: keybind.logout = %s", value);
             }
-            else if (strncmp(keybind_name, "switch_workspace_", 17) == 0) {
+            else if (strncmp(keybind_name, "switch_workspace_", 17) == 0)
+            {
                 int workspace_num = atoi(keybind_name + 17);
-                if (workspace_num >= 1 && workspace_num <= 9) {
+                if (workspace_num >= 1 && workspace_num <= 9)
+                {
                     free(state->keybinds.switch_workspace[workspace_num - 1]);
                     state->keybinds.switch_workspace[workspace_num - 1] = strdup(value);
                     LogInfo("Config: keybind.switch_workspace_%d = %s", workspace_num, value);
@@ -2406,12 +2690,16 @@ int GooeyShell_LoadConfig(GooeyShellState *state, const char* config_path) {
     return 1;
 }
 
-void GooeyShell_Logout(GooeyShellState *state) {
+void GooeyShell_Logout(GooeyShellState *state)
+{
     LogInfo("Logging out...");
 
-    if (state->logout_command) {
+    if (state->logout_command)
+    {
         system(state->logout_command);
-    } else {
+    }
+    else
+    {
         exit(0);
     }
 }
@@ -2424,9 +2712,19 @@ GooeyShellState *GooeyShell_Init(void)
         LogError("Failed to allocate GooeyShellState");
         return NULL;
     }
-    
-    if (glps_thread_mutex_init(&dbus_mutex, NULL) != 0) {
+
+    // Initialize mutexes
+    if (glps_thread_mutex_init(&dbus_mutex, NULL) != 0)
+    {
         LogError("Failed to initialize DBus mutex");
+        free(state);
+        return NULL;
+    }
+
+    if (glps_thread_mutex_init(&window_list_mutex, NULL) != 0)
+    {
+        LogError("Failed to initialize window list mutex");
+        glps_thread_mutex_destroy(&dbus_mutex);
         free(state);
         return NULL;
     }
@@ -2435,6 +2733,7 @@ GooeyShellState *GooeyShell_Init(void)
     if (!state->display)
     {
         LogError("Failed to open X display");
+        glps_thread_mutex_destroy(&window_list_mutex);
         glps_thread_mutex_destroy(&dbus_mutex);
         free(state);
         return NULL;
@@ -2443,11 +2742,14 @@ GooeyShellState *GooeyShell_Init(void)
     state->screen = DefaultScreen(state->display);
     state->root = RootWindow(state->display, state->screen);
 
+    // Initialize all pointers to NULL
     state->desktop_app_window = None;
     state->fullscreen_app_window = None;
     state->focused_window = None;
     state->drag_window = None;
     state->is_tiling_resizing = False;
+    state->window_list = NULL;
+    state->workspaces = NULL;
 
     state->monitor_info.monitors = NULL;
     state->monitor_info.num_monitors = 0;
@@ -2456,9 +2758,7 @@ GooeyShellState *GooeyShell_Init(void)
     if (!InitializeMultiMonitor(state))
     {
         LogError("Failed to initialize multi-monitor support");
-        XCloseDisplay(state->display);
-        glps_thread_mutex_destroy(&dbus_mutex);
-        free(state);
+        GooeyShell_Cleanup(state);
         return NULL;
     }
 
@@ -2469,21 +2769,19 @@ GooeyShellState *GooeyShell_Init(void)
     if (!state->gc)
     {
         LogError("Failed to create graphics context");
-        FreeMultiMonitor(state);
-        XCloseDisplay(state->display);
-        glps_thread_mutex_destroy(&dbus_mutex);
-        free(state);
+        GooeyShell_Cleanup(state);
         return NULL;
     }
 
     XGCValues gcv;
 
     state->config_file = strdup(CONFIG_FILE);
-    if (!state->config_file) {
+    if (!state->config_file)
+    {
         LogError("Failed to allocate config file path");
         goto cleanup;
     }
-    
+
     InitializeDefaultKeybinds(&state->keybinds);
     GooeyShell_LoadConfig(state, state->config_file);
 
@@ -4036,110 +4334,144 @@ void GooeyShell_RunEventLoop(GooeyShellState *state)
 
             case KeyPress:
             {
-                if (KeybindMatches(state, &ev.xkey, state->keybinds.launch_terminal)) {
+                if (KeybindMatches(state, &ev.xkey, state->keybinds.launch_terminal))
+                {
                     LogInfo("Launching terminal");
                     GooeyShell_AddWindow(state, "xterm", 0);
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.close_window)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.close_window))
+                {
                     LogInfo("Closing window");
-                    if (state->focused_window != None) {
+                    if (state->focused_window != None)
+                    {
                         WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
-                        if (node && !node->is_desktop_app && !node->is_fullscreen_app) {
+                        if (node && !node->is_desktop_app && !node->is_fullscreen_app)
+                        {
                             CloseWindow(state, node);
                         }
                     }
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.toggle_floating)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.toggle_floating))
+                {
                     LogInfo("Toggling floating");
-                    if (state->focused_window != None) {
+                    if (state->focused_window != None)
+                    {
                         WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
-                        if (node && !node->is_desktop_app && !node->is_fullscreen_app) {
+                        if (node && !node->is_desktop_app && !node->is_fullscreen_app)
+                        {
                             GooeyShell_ToggleFloating(state, node->client);
                         }
                     }
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.focus_next_window)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.focus_next_window))
+                {
                     LogInfo("Focusing next window");
                     GooeyShell_FocusNextWindow(state);
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.focus_previous_window)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.focus_previous_window))
+                {
                     LogInfo("Focusing previous window");
                     GooeyShell_FocusPreviousWindow(state);
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.set_tiling_layout)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.set_tiling_layout))
+                {
                     LogInfo("Switching to tiling layout");
                     GooeyShell_SetLayout(state, LAYOUT_TILING);
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.set_monocle_layout)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.set_monocle_layout))
+                {
                     LogInfo("Switching to monocle layout");
                     GooeyShell_SetLayout(state, LAYOUT_MONOCLE);
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.shrink_width)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.shrink_width))
+                {
                     LogInfo("Making window narrower");
                     Workspace *ws = GetCurrentWorkspace(state);
-                    if (ws && ws->monitor_tiling_roots && state->focused_window != None) {
+                    if (ws && ws->monitor_tiling_roots && state->focused_window != None)
+                    {
                         WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
-                        if (node && !node->is_floating) {
+                        if (node && !node->is_floating)
+                        {
                             HandleTilingResize(state, node, 1, -30, 0);
                         }
                     }
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.grow_width)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.grow_width))
+                {
                     LogInfo("Making window wider");
                     Workspace *ws = GetCurrentWorkspace(state);
-                    if (ws && ws->monitor_tiling_roots && state->focused_window != None) {
+                    if (ws && ws->monitor_tiling_roots && state->focused_window != None)
+                    {
                         WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
-                        if (node && !node->is_floating) {
+                        if (node && !node->is_floating)
+                        {
                             HandleTilingResize(state, node, 1, 30, 0);
                         }
                     }
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.shrink_height)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.shrink_height))
+                {
                     LogInfo("Making window shorter");
                     Workspace *ws = GetCurrentWorkspace(state);
-                    if (ws && ws->monitor_tiling_roots && state->focused_window != None) {
+                    if (ws && ws->monitor_tiling_roots && state->focused_window != None)
+                    {
                         WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
-                        if (node && !node->is_floating) {
+                        if (node && !node->is_floating)
+                        {
                             HandleTilingResize(state, node, 2, 0, -30);
                         }
                     }
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.grow_height)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.grow_height))
+                {
                     LogInfo("Making window taller");
                     Workspace *ws = GetCurrentWorkspace(state);
-                    if (ws && ws->monitor_tiling_roots && state->focused_window != None) {
+                    if (ws && ws->monitor_tiling_roots && state->focused_window != None)
+                    {
                         WindowNode *node = FindWindowNodeByFrame(state, state->focused_window);
-                        if (node && !node->is_floating) {
+                        if (node && !node->is_floating)
+                        {
                             HandleTilingResize(state, node, 2, 0, 30);
                         }
                     }
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.toggle_layout)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.toggle_layout))
+                {
                     LogInfo("Toggling layout");
                     Workspace *ws = GetCurrentWorkspace(state);
-                    if (ws) {
-                        if (ws->layout == LAYOUT_TILING) {
+                    if (ws)
+                    {
+                        if (ws->layout == LAYOUT_TILING)
+                        {
                             GooeyShell_SetLayout(state, LAYOUT_MONOCLE);
-                        } else {
+                        }
+                        else
+                        {
                             GooeyShell_SetLayout(state, LAYOUT_TILING);
                         }
                     }
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.move_window_prev_monitor)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.move_window_prev_monitor))
+                {
                     LogInfo("Moving window to previous monitor");
                     GooeyShell_MoveWindowToPreviousMonitor(state);
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.move_window_next_monitor)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.move_window_next_monitor))
+                {
                     LogInfo("Moving window to next monitor");
                     GooeyShell_MoveWindowToNextMonitor(state);
                 }
-                else if (KeybindMatches(state, &ev.xkey, state->keybinds.logout)) {
+                else if (KeybindMatches(state, &ev.xkey, state->keybinds.logout))
+                {
                     LogInfo("Logging out");
                     GooeyShell_Logout(state);
                 }
-                else {
-                    for (int i = 0; i < 9; i++) {
-                        if (KeybindMatches(state, &ev.xkey, state->keybinds.switch_workspace[i])) {
+                else
+                {
+                    for (int i = 0; i < 9; i++)
+                    {
+                        if (KeybindMatches(state, &ev.xkey, state->keybinds.switch_workspace[i]))
+                        {
                             LogInfo("Switching to workspace %d", i + 1);
                             GooeyShell_SwitchWorkspace(state, i + 1);
                             break;
@@ -4166,7 +4498,6 @@ void GooeyShell_RunEventLoop(GooeyShellState *state)
         }
     }
 }
-
 void GooeyShell_AddFullscreenApp(GooeyShellState *state, const char *command, int stay_on_top)
 {
     if (!state || !command)
@@ -4181,14 +4512,29 @@ void GooeyShell_AddFullscreenApp(GooeyShellState *state, const char *command, in
             setenv("GOOEY_STAY_ON_TOP", "1", 1);
         }
 
-        for (int i = 3; i < 1024; i++)
-            close(i);
+        // Proper file descriptor closing
+        int max_fd = sysconf(_SC_OPEN_MAX);
+        if (max_fd == -1)
+        {
+            max_fd = 1024; // Fallback
+        }
 
-        execlp(command, command, NULL);
+        for (int i = 3; i < max_fd; i++)
+        {
+            close(i);
+        }
+
+        execlp("sh", "sh", "-c", command, NULL);
+
+        // If we get here, exec failed
+        LogError("Failed to execute fullscreen app: %s", command);
         _exit(1);
     }
+    else if (pid < 0)
+    {
+        LogError("Failed to fork for fullscreen app: %s", command);
+    }
 }
-
 void GooeyShell_AddWindow(GooeyShellState *state, const char *command, int desktop_app)
 {
     if (!state || !command)
@@ -4202,11 +4548,28 @@ void GooeyShell_AddWindow(GooeyShellState *state, const char *command, int deskt
             setenv("GOOEY_DESKTOP_APP", "1", 1);
         }
 
-        for (int i = 3; i < 1024; i++)
-            close(i);
+        // Proper file descriptor closing
+        int max_fd = sysconf(_SC_OPEN_MAX);
+        if (max_fd == -1)
+        {
+            max_fd = 1024; // Fallback
+        }
 
-        execlp(command, command, NULL);
+        for (int i = 3; i < max_fd; i++)
+        {
+            close(i);
+        }
+
+        // Execute with proper error handling
+        execlp("sh", "sh", "-c", command, NULL);
+
+        // If we get here, exec failed
+        LogError("Failed to execute command: %s", command);
         _exit(1);
+    }
+    else if (pid < 0)
+    {
+        LogError("Failed to fork for command: %s", command);
     }
 }
 
@@ -4300,22 +4663,25 @@ static void CleanupWorkspace(Workspace *ws)
     if (!ws)
         return;
 
-    if (ws->monitor_tiling_roots) {
-        for (int i = 0; i < ws->monitor_tiling_roots_count; i++) {
-            if (ws->monitor_tiling_roots[i]) {
+    if (ws->monitor_tiling_roots)
+    {
+        for (int i = 0; i < ws->monitor_tiling_roots_count; i++)
+        {
+            if (ws->monitor_tiling_roots[i])
+            {
                 FreeTilingTree(ws->monitor_tiling_roots[i]);
             }
         }
         free(ws->monitor_tiling_roots);
     }
 
-    if (ws->stack_ratios) {
+    if (ws->stack_ratios)
+    {
         free(ws->stack_ratios);
     }
 
     free(ws);
 }
-
 void GooeyShell_Cleanup(GooeyShellState *state)
 {
     if (!state)
@@ -4323,11 +4689,14 @@ void GooeyShell_Cleanup(GooeyShellState *state)
 
     LogInfo("Cleaning up GooeyShell");
 
+    // Signal DBus thread to stop
     dbus_thread_running = 0;
+    
     if (state->is_dbus_init)
     {
         glps_thread_join(dbus_thread, NULL);
     }
+    
     if (state->is_dragging || state->is_resizing || state->is_tiling_resizing)
     {
         XUngrabPointer(state->display, CurrentTime);
@@ -4335,6 +4704,7 @@ void GooeyShell_Cleanup(GooeyShellState *state)
 
     FocusRootWindow(state);
 
+    // Clean up workspaces safely
     Workspace *ws = state->workspaces;
     while (ws)
     {
@@ -4343,13 +4713,20 @@ void GooeyShell_Cleanup(GooeyShellState *state)
         ws = next;
     }
 
+    // Clean up window list safely
     WindowNode *current = state->window_list;
     while (current)
     {
         WindowNode *next = current->next;
-        XUnmapWindow(state->display, current->frame);
-        XUnmapWindow(state->display, current->client);
-        XDestroyWindow(state->display, current->frame);
+        if (current->frame != None) {
+            XUnmapWindow(state->display, current->frame);
+        }
+        if (current->client != None) {
+            XUnmapWindow(state->display, current->client);
+        }
+        if (current->frame != None) {
+            XDestroyWindow(state->display, current->frame);
+        }
         FreeWindowNode(current);
         current = next;
     }
@@ -4357,6 +4734,7 @@ void GooeyShell_Cleanup(GooeyShellState *state)
 
     FreeMultiMonitor(state);
 
+    // Clean up opened windows array
     if (opened_windows)
     {
         free(opened_windows);
@@ -4365,38 +4743,62 @@ void GooeyShell_Cleanup(GooeyShellState *state)
         opened_windows_capacity = 0;
     }
 
+    // Clean up DBus
     if (state->dbus_connection)
     {
         dbus_connection_unref(state->dbus_connection);
+        state->dbus_connection = NULL;
     }
 
+    // Free resources
     FreeKeybinds(&state->keybinds);
     SAFE_FREE(state->config_file);
     SAFE_FREE(state->logout_command);
 
-    if (state->text_gc)
+    // Free X resources
+    if (state->text_gc) {
         XFreeGC(state->display, state->text_gc);
-    if (state->titlebar_gc)
+        state->text_gc = NULL;
+    }
+    if (state->titlebar_gc) {
         XFreeGC(state->display, state->titlebar_gc);
-    if (state->button_gc)
+        state->titlebar_gc = NULL;
+    }
+    if (state->button_gc) {
         XFreeGC(state->display, state->button_gc);
-    if (state->gc)
+        state->button_gc = NULL;
+    }
+    if (state->gc) {
         XFreeGC(state->display, state->gc);
+        state->gc = NULL;
+    }
 
-    if (state->move_cursor)
+    // Free cursors
+    if (state->move_cursor) {
         XFreeCursor(state->display, state->move_cursor);
-    if (state->resize_cursor)
+        state->move_cursor = None;
+    }
+    if (state->resize_cursor) {
         XFreeCursor(state->display, state->resize_cursor);
-    if (state->v_resize_cursor)
+        state->resize_cursor = None;
+    }
+    if (state->v_resize_cursor) {
         XFreeCursor(state->display, state->v_resize_cursor);
-    if (state->normal_cursor)
+        state->v_resize_cursor = None;
+    }
+    if (state->normal_cursor) {
         XFreeCursor(state->display, state->normal_cursor);
+        state->normal_cursor = None;
+    }
     if (state->custom_cursor && state->custom_cursor != state->normal_cursor)
     {
         XFreeCursor(state->display, state->custom_cursor);
+        state->custom_cursor = None;
     }
 
+    // Clean up display and mutexes
     SAFE_CLOSE_DISPLAY(state->display);
+    glps_thread_mutex_destroy(&window_list_mutex);
     glps_thread_mutex_destroy(&dbus_mutex);
     free(state);
 }

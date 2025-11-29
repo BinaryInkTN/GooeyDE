@@ -19,25 +19,29 @@
 #define WINDOW_OPACITY 0.95f
 #define CONFIG_FILE "~/.config/gooey_shell/config"
 
-typedef enum {
+typedef enum
+{
     LAYOUT_TILING,
     LAYOUT_MONOCLE,
     LAYOUT_FLOATING
 } LayoutMode;
 
-typedef enum {
+typedef enum
+{
     SPLIT_NONE,
     SPLIT_VERTICAL,
     SPLIT_HORIZONTAL
 } SplitDirection;
 
-typedef struct Monitor {
+typedef struct Monitor
+{
     int x, y;
     int width, height;
     int number;
 } Monitor;
 
-typedef struct MonitorInfo {
+typedef struct MonitorInfo
+{
     Monitor *monitors;
     int num_monitors;
     int primary_monitor;
@@ -45,7 +49,8 @@ typedef struct MonitorInfo {
 
 typedef struct WindowNode WindowNode;
 
-typedef struct TilingNode {
+typedef struct TilingNode
+{
     WindowNode *window;
     struct TilingNode *left;
     struct TilingNode *right;
@@ -54,9 +59,11 @@ typedef struct TilingNode {
     float ratio;
     SplitDirection split;
     bool is_leaf;
+    int ref_count;
 } TilingNode;
 
-typedef struct Workspace {
+typedef struct Workspace
+{
     int number;
     LayoutMode layout;
     WindowNode *windows;
@@ -68,7 +75,8 @@ typedef struct Workspace {
     int monitor_tiling_roots_count;
 } Workspace;
 
-struct WindowNode {
+struct WindowNode
+{
     Window frame;
     Window client;
     char *title;
@@ -92,7 +100,8 @@ struct WindowNode {
     WindowNode *prev;
 };
 
-typedef struct PrecomputedAtoms {
+typedef struct PrecomputedAtoms
+{
     Atom net_wm_name;
     Atom utf8_string;
     Atom wm_protocols;
@@ -117,7 +126,8 @@ typedef struct PrecomputedAtoms {
     Atom net_wm_window_opacity;
 } PrecomputedAtoms;
 
-typedef struct KeybindConfig {
+typedef struct KeybindConfig
+{
     char *launch_terminal;
     char *close_window;
     char *toggle_floating;
@@ -132,11 +142,12 @@ typedef struct KeybindConfig {
     char *toggle_layout;
     char *move_window_prev_monitor;
     char *move_window_next_monitor;
-    char *switch_workspace[9]; 
+    char *switch_workspace[9];
     char *logout;
 } KeybindConfig;
 
-typedef struct GooeyShellState {
+typedef struct GooeyShellState
+{
     Display *display;
     int screen;
     Window root;
@@ -199,7 +210,7 @@ typedef struct GooeyShellState {
 
     char *config_file;
     char *logout_command;
-    KeybindConfig keybinds;  
+    KeybindConfig keybinds;
 } GooeyShellState;
 
 GooeyShellState *GooeyShell_Init(void);
