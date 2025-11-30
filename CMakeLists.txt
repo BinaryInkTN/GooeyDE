@@ -36,7 +36,7 @@ set(COMMON_LIBS
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-rpath,/usr/local/lib")
 
-add_executable(gooey_shell main.c components/gooey_shell.c)
+add_executable(gooey_shell main.c components/gooey_shell.c components/gooey_shell_config.c components/gooey_shell_tiling.c)
 target_link_libraries(gooey_shell ${COMMON_LIBS})
 
 add_executable(gooeyde_appmenu components/gooeyde_appmenu.c)

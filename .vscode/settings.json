@@ -14,6 +14,12 @@
         "devices_helper.h": "c",
         "chrono": "c",
         "functional": "c",
-        "stdbool.h": "c"
+        "stdbool.h": "c",
+        "stdlib.h": "c",
+        "pwd.h": "c",
+        "stdio.h": "c",
+        "gooey_shell.h": "c",
+        "keysym.h": "c",
+        "stat.h": "c"
     }
 }
