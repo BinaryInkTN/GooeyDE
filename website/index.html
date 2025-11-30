@@ -312,7 +312,7 @@
         <div class="w-full max-w-2xl mt-8 fade-in">
             <h3 class="text-center text-lg font-medium mb-4">Install with a single command:</h3>
             <div class="command-box">
-                <div class="command-text">sudo curl -s https://raw.githubusercontent.com/BinaryInkTN/GooeyDE/refs/heads/main/installer.sh | bash</div>
+                <div class="command-text">curl -s https://raw.githubusercontent.com/BinaryInkTN/GooeyDE/refs/heads/main/installer.sh | bash</div>
                 <button class="copy-btn" id="copy-command">
                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-copy">
                         <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
@@ -719,7 +719,7 @@
             </p>
             <div class="flex flex-wrap gap-4 mt-6">
                 <div class="command-box">
-                    <div class="command-text">sudo curl -s https://raw.githubusercontent.com/BinaryInkTN/GooeyDE/refs/heads/main/installer.sh | bash</div>
+                    <div class="command-text">curl -s https://raw.githubusercontent.com/BinaryInkTN/GooeyDE/refs/heads/main/installer.sh | bash</div>
                     <button class="copy-btn" id="copy-command">
                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-copy">
                             <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
@@ -777,7 +777,7 @@
             
             // Copy command functionality
             const copyButtons = document.querySelectorAll('.copy-btn');
-            const commandText = 'sudo curl -s https://raw.githubusercontent.com/BinaryInkTN/GooeyDE/refs/heads/main/installer.sh | bash';
+            const commandText = 'curl -s https://raw.githubusercontent.com/BinaryInkTN/GooeyDE/refs/heads/main/installer.sh | bash';
             
             copyButtons.forEach(button => {
                 button.addEventListener('click', function() {
