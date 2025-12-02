@@ -20,6 +20,7 @@
         "stdio.h": "c",
         "gooey_shell.h": "c",
         "keysym.h": "c",
-        "stat.h": "c"
+        "stat.h": "c",
+        "gooey_shell_core.h": "c"
     }
 }

@@ -1,12 +1,9 @@
 #ifndef GOOEY_SHELL_H
 #define GOOEY_SHELL_H
-
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <dbus/dbus.h>
 #include <GLPS/glps_thread.h>
-
-// Constants and configuration
 #define WINDOW_MANAGER_NAME "GooeyShell"
 #define CONFIG_FILE "~/.config/gooey_shell/config"
 #define BAR_HEIGHT 24
@@ -19,22 +16,20 @@
 #define DEFAULT_WIDTH 800
 #define DEFAULT_HEIGHT 600
 #define WINDOW_OPACITY 0.95f
-
-// Enums
-typedef enum {
+typedef enum
+{
     LAYOUT_TILING,
     LAYOUT_MONOCLE,
     LAYOUT_FLOATING
 } LayoutMode;
-
-typedef enum {
+typedef enum
+{
     SPLIT_NONE,
     SPLIT_VERTICAL,
     SPLIT_HORIZONTAL
 } SplitDirection;
-
-// Structure definitions
-typedef struct WindowNode {
+typedef struct WindowNode
+{
     Window frame;
     Window client;
     char *title;
@@ -50,20 +45,15 @@ typedef struct WindowNode {
     int is_fullscreen_app;
     int is_titlebar_disabled;
     int stay_on_top;
-    
-    // Tiling state
     int tiling_x, tiling_y;
     int tiling_width, tiling_height;
-    
-    // Floating state
     int floating_x, floating_y;
     int floating_width, floating_height;
-    
     struct WindowNode *next;
     struct WindowNode *prev;
 } WindowNode;
-
-typedef struct TilingNode {
+typedef struct TilingNode
+{
     WindowNode *window;
     struct TilingNode *left;
     struct TilingNode *right;
@@ -75,20 +65,20 @@ typedef struct TilingNode {
     int is_leaf;
     int ref_count;
 } TilingNode;
-
-typedef struct Monitor {
+typedef struct Monitor
+{
     int x, y;
     int width, height;
     int number;
 } Monitor;
-
-typedef struct MonitorInfo {
+typedef struct MonitorInfo
+{
     Monitor *monitors;
     int num_monitors;
     int primary_monitor;
 } MonitorInfo;
-
-typedef struct KeybindConfig {
+typedef struct KeybindConfig
+{
     char *launch_terminal;
     char *close_window;
     char *toggle_floating;
@@ -103,27 +93,24 @@ typedef struct KeybindConfig {
     char *toggle_layout;
     char *move_window_prev_monitor;
     char *move_window_next_monitor;
+    char *launch_menu;
     char *logout;
     char *switch_workspace[9];
 } KeybindConfig;
-
-typedef struct Workspace {
+typedef struct Workspace
+{
     int number;
     LayoutMode layout;
     WindowNode *windows;
     struct Workspace *next;
-    
-    // Tiling state
     float master_ratio;
     float *stack_ratios;
     int stack_ratios_count;
-    
-    // Multi-monitor tiling
     TilingNode **monitor_tiling_roots;
     int monitor_tiling_roots_count;
 } Workspace;
-
-typedef struct PrecomputedAtoms {
+typedef struct PrecomputedAtoms
+{
     Atom net_wm_name;
     Atom utf8_string;
     Atom wm_protocols;
@@ -147,20 +134,16 @@ typedef struct PrecomputedAtoms {
     Atom gooey_desktop_app;
     Atom net_wm_window_opacity;
 } PrecomputedAtoms;
-
-typedef struct GooeyShellState {
+typedef struct GooeyShellState
+{
     Display *display;
     int screen;
     Window root;
-    
-    // Window management
     WindowNode *window_list;
     Window focused_window;
     Window desktop_app_window;
     Window fullscreen_app_window;
     Window drag_window;
-    
-    // State flags
     int is_dragging;
     int is_resizing;
     int is_tiling_resizing;
@@ -169,23 +152,15 @@ typedef struct GooeyShellState {
     int drag_start_x, drag_start_y;
     int original_x, original_y;
     int original_width, original_height;
-    
-    // Workspace management
     Workspace *workspaces;
     int current_workspace;
     LayoutMode current_layout;
-    
-    // Multi-monitor support
     MonitorInfo monitor_info;
     int focused_monitor;
-    
-    // Graphics
     GC gc;
     GC titlebar_gc;
     GC text_gc;
     GC button_gc;
-    
-    // Colors
     unsigned long titlebar_color;
     unsigned long titlebar_focused_color;
     unsigned long text_color;
@@ -196,37 +171,24 @@ typedef struct GooeyShellState {
     unsigned long minimize_button_color;
     unsigned long maximize_button_color;
     unsigned long bg_color;
-    
-    // Cursors
     Cursor move_cursor;
     Cursor resize_cursor;
     Cursor v_resize_cursor;
     Cursor normal_cursor;
     Cursor custom_cursor;
-    
-    // Configuration
     char *config_file;
     KeybindConfig keybinds;
     char *logout_command;
     int inner_gap;
     int outer_gap;
-    
-    // Input
     unsigned int mod_key;
     int super_pressed;
-    
-    // DBus
     DBusConnection *dbus_connection;
     DBusError dbus_error;
     int is_dbus_init;
-    
-    // Features
     int supports_opacity;
 } GooeyShellState;
-
-// Include the split headers
 #include "gooey_shell_core.h"
 #include "gooey_shell_tiling.h"
 #include "gooey_shell_config.h"
-
-#endif // GOOEY_SHELL_H
+#endif

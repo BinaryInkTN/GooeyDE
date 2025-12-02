@@ -1,13 +1,10 @@
 #ifndef GOOEY_SHELL_CORE_H
 #define GOOEY_SHELL_CORE_H
-
 #include "gooey_shell.h"
 #include <X11/Xlib.h>
 #include <X11/Xatom.h>
 #include <dbus/dbus.h>
 #include <GLPS/glps_thread.h>
-
-// Safe memory management macros
 #define SAFE_FREE(ptr)  \
     do                  \
     {                   \
@@ -41,8 +38,6 @@
             XDestroyWindow(dpy, win); \
         }                             \
     } while (0)
-
-// External declarations
 extern PrecomputedAtoms atoms;
 extern Window *opened_windows;
 extern int opened_windows_count;
@@ -53,8 +48,6 @@ extern gthread_mutex_t dbus_mutex;
 extern gthread_mutex_t window_list_mutex;
 extern int window_list_update_pending;
 extern int pending_x_flush;
-
-// Function declarations
 int IgnoreXError(Display *d, XErrorEvent *e);
 void InitializeAtoms(Display *display);
 int InitializeMultiMonitor(GooeyShellState *state);
@@ -106,8 +99,6 @@ void FocusRootWindow(GooeyShellState *state);
 void ProcessDBusMessage(GooeyShellState *state, DBusMessage *msg);
 void *DBusListenerThread(void *arg);
 void SetupDBUS(GooeyShellState *state);
-
-// Public API functions
 void GooeyShell_MarkAsDesktopApp(GooeyShellState *state, Window client);
 void GooeyShell_RunEventLoop(GooeyShellState *state);
 void GooeyShell_AddFullscreenApp(GooeyShellState *state, const char *command, int stay_on_top);
@@ -120,5 +111,4 @@ int GooeyShell_IsWindowOpened(GooeyShellState *state, Window window);
 int GooeyShell_IsWindowMinimized(GooeyShellState *state, Window client);
 void GooeyShell_Cleanup(GooeyShellState *state);
 GooeyShellState *GooeyShell_Init(void);
-
-#endif // GOOEY_SHELL_CORE_H
+#endif
