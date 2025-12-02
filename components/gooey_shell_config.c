@@ -349,8 +349,8 @@ void CreateDefaultConfig(const char *config_path) {
     fprintf(file, "# Gooey Shell Configuration File\n");
     fprintf(file, "# Colors can be specified as hex (#RRGGBB) or common names\n\n");
 
-    fprintf(file, "# Focus border color (Material Blue by default)\n");
-    fprintf(file, "focused_border_color = #2196F3\n\n");
+    fprintf(file, "# Focus border color (Indigo by default)\n");
+    fprintf(file, "focused_border_color = #3F51B5\n\n");
 
     fprintf(file, "# Logout command\n");
     fprintf(file, "logout_command = killall gooey_shell\n\n");

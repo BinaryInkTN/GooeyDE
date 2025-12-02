@@ -469,7 +469,7 @@ int main(int argc, char **argv)
         screen_info.height = 768;
     }
 
-    win = GooeyWindow_Create("Gooey Desktop", screen_info.width, screen_info.height, true);
+    win = GooeyWindow_Create("Gooey Desktop", 0, 0, screen_info.width, screen_info.height, true);
     GooeyNotifications_Run(win, "Welcome to GooeyDE", NOTIFICATION_INFO, NOTIFICATION_POSITION_TOP_RIGHT);
 
     wallpaper = GooeyImage_Create("/usr/local/share/gooeyde/assets/bg.png", 0, 50, screen_info.width, screen_info.height - 50, NULL, NULL);

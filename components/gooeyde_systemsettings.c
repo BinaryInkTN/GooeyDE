@@ -1469,7 +1469,7 @@ int main(int argc, char **argv)
     window_width = screen_info.width;
     window_height = screen_info.height - 50;
 
-    win = GooeyWindow_Create("Gooey Settings", window_width, window_height, true);
+    win = GooeyWindow_Create("Gooey Settings", 0, 0, window_width, window_height, true);
     if (!win)
     {
         fprintf(stderr, "Failed to create main window\n");

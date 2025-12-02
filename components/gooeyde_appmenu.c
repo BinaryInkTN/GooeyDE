@@ -890,7 +890,7 @@ int main(int argc, char **argv) {
     screen_info = get_screen_resolution();
     printf("Screen resolution: %dx%d\n", screen_info.width, screen_info.height);
 
-    main_window = GooeyWindow_Create("Gooey Application Launcher", screen_info.width, screen_info.height, true);
+    main_window = GooeyWindow_Create("Gooey Application Launcher", 0, 0, screen_info.width, screen_info.height, true);
     if (!main_window) {
         fprintf(stderr, "Failed to create main window\n");
         cleanup_application();
