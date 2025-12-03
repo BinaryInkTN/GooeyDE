@@ -171,6 +171,7 @@ typedef struct GooeyShellState
     unsigned long minimize_button_color;
     unsigned long maximize_button_color;
     unsigned long bg_color;
+    char *wallpaper_path;
     Cursor move_cursor;
     Cursor resize_cursor;
     Cursor v_resize_cursor;

@@ -21,6 +21,7 @@ include_directories(
      /usr/local/include/Gooey
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/components
+
 )
 
 set(COMMON_LIBS
@@ -36,7 +37,7 @@ set(COMMON_LIBS
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-rpath,/usr/local/lib")
 
-add_executable(gooey_shell main.c components/gooey_shell.c components/gooey_shell_config.c components/gooey_shell_tiling.c)
+add_executable(gooey_shell main.c components/utils/ini.c components/gooey_shell.c components/gooey_shell_config.c components/gooey_shell_tiling.c)
 target_link_libraries(gooey_shell ${COMMON_LIBS})
 
 add_executable(gooeyde_appmenu components/gooeyde_appmenu.c)
@@ -47,6 +48,12 @@ target_link_libraries(gooeyde_systemsettings ${COMMON_LIBS})
 
 add_executable(gooeyde_desktop components/gooeyde_desktop.c)
 target_link_libraries(gooeyde_desktop ${COMMON_LIBS})
+
+
+
+add_executable(gooeyde_config components/gooeyde_config.c)
+target_link_libraries(gooeyde_config ${COMMON_LIBS})
+
 
 
 add_custom_command(TARGET gooey_shell POST_BUILD
@@ -70,3 +77,4 @@ add_custom_target(copy_assets ALL
 add_dependencies(gooeyde_appmenu copy_assets)
 add_dependencies(gooeyde_systemsettings copy_assets)
 add_dependencies(gooeyde_desktop copy_assets)
+add_dependencies(gooeyde_config copy_assets)

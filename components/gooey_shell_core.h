@@ -92,6 +92,7 @@ void RemoveFromOpenedWindows(Window window);
 int IsWindowInOpenedWindows(Window window);
 void SendWindowStateThroughDBus(GooeyShellState *state, Window window, const char *st);
 void SendWorkspaceChangedThroughDBus(GooeyShellState *state, int old_workspace, int new_workspace);
+void SendWallpaperChangeThroughDBus(GooeyShellState *state, const char *wallpaper_path);
 void HandleDBusWindowCommand(GooeyShellState *state, DBusMessage *msg);
 void ScheduleWindowListUpdate(GooeyShellState *state);
 void OptimizedXFlush(GooeyShellState *state);

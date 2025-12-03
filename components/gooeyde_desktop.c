@@ -50,9 +50,11 @@ int init_dbus_connection();
 void cleanup_dbus();
 void process_dbus_message(DBusMessage *message);
 void handle_workspace_changed(DBusMessage *message);
+void handle_wallpaper_changed(DBusMessage *message);
 void create_status_icons();
 void update_workspace_indicator(int workspace);
 void mute_audio_callback();
+void change_wallpaper(const char *wallpaper_path);
 void run_app_menu()
 {
     if (fork() == 0)
@@ -73,10 +75,11 @@ void run_systemsettings()
             "/usr/bin/systemsettings",
             "/usr/bin/xfce4-settings-manager",
             "/usr/bin/cinnamon-settings",
-            NULL
-        };
-        for (int i = 0; possible_paths[i] != NULL; i++) {
-            if (access(possible_paths[i], X_OK) == 0) {
+            NULL};
+        for (int i = 0; possible_paths[i] != NULL; i++)
+        {
+            if (access(possible_paths[i], X_OK) == 0)
+            {
                 execl(possible_paths[i], possible_paths[i], NULL);
                 perror("Failed to launch system settings");
             }
@@ -255,7 +258,7 @@ int init_dbus_connection()
         dbus_conn = NULL;
         return 0;
     }
-    char match_rule[256];
+    char match_rule[512];
     snprintf(match_rule, sizeof(match_rule),
              "type='signal',interface='%s',path='%s'",
              DBUS_INTERFACE, DBUS_PATH);
@@ -316,6 +319,10 @@ void process_dbus_message(DBusMessage *message)
         {
             handle_workspace_changed(message);
         }
+        else if (strcmp(member, "WallpaperChanged") == 0)
+        {
+            handle_wallpaper_changed(message);
+        }
     }
 }
 void handle_workspace_changed(DBusMessage *message)
@@ -341,6 +348,54 @@ void handle_workspace_changed(DBusMessage *message)
     current_workspace = new_workspace;
     update_workspace_indicator(new_workspace);
 }
+void handle_wallpaper_changed(DBusMessage *message)
+{
+    DBusMessageIter iter;
+    if (!dbus_message_iter_init(message, &iter))
+    {
+        fprintf(stderr, "No arguments in WallpaperChanged signal\n");
+        return;
+    }
+    const char *wallpaper_path = NULL;
+    if (dbus_message_iter_get_arg_type(&iter) == DBUS_TYPE_STRING)
+    {
+        dbus_message_iter_get_basic(&iter, &wallpaper_path);
+    }
+    if (wallpaper_path == NULL)
+    {
+        fprintf(stderr, "Invalid wallpaper path in WallpaperChanged signal\n");
+        return;
+    }
+    printf("Wallpaper changed: %s\n", wallpaper_path);
+    change_wallpaper(wallpaper_path);
+}
+void change_wallpaper(const char *wallpaper_path)
+{
+    if (!wallpaper_path || strlen(wallpaper_path) == 0)
+    {
+        fprintf(stderr, "Empty wallpaper path\n");
+        return;
+    }
+    if (access(wallpaper_path, F_OK) != 0)
+    {
+        fprintf(stderr, "Wallpaper file not found: %s\n", wallpaper_path);
+        return;
+    }
+    strncpy(current_wallpaper_path, wallpaper_path, sizeof(current_wallpaper_path) - 1);
+    current_wallpaper_path[sizeof(current_wallpaper_path) - 1] = '\0';
+    glps_thread_mutex_lock(&ui_update_mutex);
+    if (wallpaper)
+    {
+        GooeyImage_SetImage(wallpaper, wallpaper_path);
+    }
+    glps_thread_mutex_unlock(&ui_update_mutex);
+    const char *filename = strrchr(wallpaper_path, '/');
+    if (filename)
+        filename++;
+    else
+        filename = wallpaper_path;
+    printf("Wallpaper updated to: %s\n", wallpaper_path);
+}
 void update_workspace_indicator(int workspace)
 {
     char workspace_text[32];
@@ -365,9 +420,13 @@ void create_status_icons()
     int icon_size = 24;
     int icon_y = 13;
     int start_x = screen_info.width - 400;
-    wifi_status_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/wifi_on.png", start_x, icon_y, icon_size, icon_size, NULL, NULL);
-    volume_status_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/volume_high.png", start_x + 80, icon_y, icon_size, icon_size, mute_audio_callback, NULL);
-    battery_status_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/battery_full.png", start_x + 120, icon_y, icon_size, icon_size, NULL, NULL);
+    wifi_status_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/wifi_on.png",
+                                         start_x, icon_y, icon_size, icon_size, NULL, NULL);
+    volume_status_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/volume_high.png",
+                                           start_x + 80, icon_y, icon_size, icon_size,
+                                           mute_audio_callback, NULL);
+    battery_status_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/battery_full.png",
+                                            start_x + 120, icon_y, icon_size, icon_size, NULL, NULL);
     battery_percent_label = GooeyLabel_Create("85%", 0.26f, start_x + 148, icon_y + 5);
     GooeyLabel_SetColor(battery_percent_label, 0xFFFFFF);
     GooeyWindow_RegisterWidget(win, wifi_status_icon);
@@ -388,16 +447,21 @@ int main(int argc, char **argv)
     }
     win = GooeyWindow_Create("Gooey Desktop", 0, 0, screen_info.width, screen_info.height, true);
     GooeyNotifications_Run(win, "Welcome to GooeyDE", NOTIFICATION_INFO, NOTIFICATION_POSITION_TOP_RIGHT);
-    wallpaper = GooeyImage_Create("/usr/local/share/gooeyde/assets/bg.png", 0, 50, screen_info.width, screen_info.height - 50, NULL, NULL);
+    wallpaper = GooeyImage_Create(current_wallpaper_path, 0, 50,
+                                  screen_info.width, screen_info.height - 50,
+                                  NULL, NULL);
     GooeyCanvas *canvas = GooeyCanvas_Create(0, 0, screen_info.width, 50, NULL, NULL);
-    GooeyCanvas_DrawRectangle(canvas, 0, 0, screen_info.width, 50, 0x222222, true, 1.0f, true, 1.0f);
+    GooeyCanvas_DrawRectangle(canvas, 0, 0, screen_info.width, 50, 0x222222,
+                              true, 1.0f, true, 1.0f);
     GooeyCanvas_DrawLine(canvas, 50, 0, 50, 50, 0xFFFFFF);
-    workspace_indicator = GooeyLabel_Create("Workspace 1", 18.0f, screen_info.width / 2 - 60, 30);
+    workspace_indicator = GooeyLabel_Create("Workspace 1", 18.0f,
+                                            screen_info.width / 2 - 60, 30);
     GooeyLabel_SetColor(workspace_indicator, 0xFFFFFF);
-    GooeyImage *apps_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/apps.png", 10, 10, 30, 30, run_app_menu, NULL);
-    GooeyImage *settings_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/settings.png", 
-                                                 screen_info.width - 210, 10, 30, 30, 
-                                                 run_systemsettings, NULL);
+    GooeyImage *apps_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/apps.png",
+                                              10, 10, 30, 30, run_app_menu, NULL);
+    GooeyImage *settings_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/settings.png",
+                                                  screen_info.width - 210, 10, 30, 30,
+                                                  run_systemsettings, NULL);
     time_label = GooeyLabel_Create("Loading...", 18.0f, screen_info.width - 160, 23);
     GooeyLabel_SetColor(time_label, 0xFFFFFF);
     date_label = GooeyLabel_Create("Loading...", 12.0f, screen_info.width - 160, 40);
@@ -411,7 +475,8 @@ int main(int argc, char **argv)
     GooeyWindow_RegisterWidget(win, settings_icon);
     GooeyWindow_RegisterWidget(win, time_label);
     GooeyWindow_RegisterWidget(win, date_label);
-    GooeyLabel *build_number_label = GooeyLabel_Create("Build: GDE-27112025-30", 24.0f, 15, 100);
+    GooeyLabel *build_number_label = GooeyLabel_Create("Build: GDE-27112025-30",
+                                                       24.0f, 15, 100);
     GooeyLabel_SetColor(build_number_label, 0xFFFFFF);
     GooeyWindow_RegisterWidget(win, build_number_label);
     init_system_settings();
@@ -444,10 +509,10 @@ int main(int argc, char **argv)
     }
     printf("Desktop started successfully\n");
     printf("Screen resolution: %dx%d\n", screen_info.width, screen_info.height);
-    printf("Settings icon now launches system settings directly\n");
-    printf("Control panel has been removed permanently\n");
+    printf("Initial wallpaper: %s\n", current_wallpaper_path);
+    printf("Entering main window loop...\n");
     GooeyWindow_Run(1, win);
-    printf("Stopping threads...\n");
+    printf("Window closed, stopping threads...\n");
     time_thread_running = 0;
     dbus_thread_running = 0;
     glps_thread_join(time_thread, NULL);

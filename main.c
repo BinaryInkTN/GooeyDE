@@ -13,7 +13,7 @@ int main()
         return 1;
     }
 
-   
+
     GooeyShell_RunEventLoop(desktop);
 
     GooeyShell_Cleanup(desktop);

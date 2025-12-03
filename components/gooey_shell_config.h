@@ -13,4 +13,5 @@ int ParseColor(const char *color_str);
 void CreateDefaultConfig(const char *config_path);
 int GooeyShell_LoadConfig(GooeyShellState *state, const char *config_path);
 void GooeyShell_Logout(GooeyShellState *state);
+int WriteConfigKey(const char *config_path, const char *key, const char *value);
 #endif

@@ -21,6 +21,8 @@
         "gooey_shell.h": "c",
         "keysym.h": "c",
         "stat.h": "c",
-        "gooey_shell_core.h": "c"
+        "gooey_shell_core.h": "c",
+        "cursorfont.h": "c",
+        "gooey_shell_config.h": "c"
     }
 }
