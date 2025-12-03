@@ -6,7 +6,7 @@
 #include <GLPS/glps_thread.h>
 #define WINDOW_MANAGER_NAME "GooeyShell"
 #define CONFIG_FILE "~/.config/gooey_shell/config"
-#define BAR_HEIGHT 24
+#define BAR_HEIGHT 50
 #define TITLE_BAR_HEIGHT 24
 #define BORDER_WIDTH 2
 #define BUTTON_SIZE 12
