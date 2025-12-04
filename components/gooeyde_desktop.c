@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -112,7 +113,7 @@ void create_memory_chart();
 
 float get_load_average();
 void update_load_chart();
-void draw_load_chart();  
+void draw_load_chart();
 void create_load_chart();
 
 void run_app_menu()
@@ -342,10 +343,9 @@ float get_load_average()
     }
     float load_avg = (float)info.loads[0] / 65536.0f;
 
-
     float load_percent = load_avg * 100.0f;
 
-    return fminf(fmaxf(load_percent, 0.0f), 400.0f); // Cap at 400% (load of 4.0)
+    return fminf(fmaxf(load_percent, 0.0f), 400.0f);
 }
 
 void update_cpu_chart()
@@ -408,7 +408,6 @@ void update_load_chart()
     if (load_label)
     {
         char load_text[32];
-        // Show the actual load average value (divide by 100 to get the load value)
         float actual_load = load_avg / 100.0f;
         snprintf(load_text, sizeof(load_text), "Load: %.2f", actual_load);
         GooeyLabel_SetText(load_label, load_text);
@@ -559,7 +558,6 @@ void draw_load_chart()
 
         if (load_value > 0)
         {
-
             float display_load = fminf(load_value, 200.0f);
             int bar_height = (int)((display_load / 200.0f) * chart_height);
             if (bar_height < 1)
@@ -649,7 +647,6 @@ void create_cpu_chart()
         cpu_percentages[i] = 0.0f;
     }
 
-    // Move CPU chart to make space for load chart
     cpu_chart_canvas = GooeyCanvas_Create(screen_info.width - 750, 0, 130, 40, NULL, NULL);
     cpu_label = GooeyLabel_Create("CPU: 0.0%", 10.0f, screen_info.width - 710, 29);
     GooeyLabel_SetColor(cpu_label, 0xFFFFFF);
@@ -667,7 +664,6 @@ void create_memory_chart()
         mem_percentages[i] = 0.0f;
     }
 
-    // Move memory chart to the right
     mem_chart_canvas = GooeyCanvas_Create(screen_info.width - 900, 0, 130, 40, NULL, NULL);
     mem_label = GooeyLabel_Create("RAM: 0.0%", 10.0f, screen_info.width - 863, 29);
     GooeyLabel_SetColor(mem_label, 0xFFFFFF);
@@ -685,7 +681,6 @@ void create_load_chart()
         load_percentages[i] = 0.0f;
     }
 
-    // Create load chart on the left of CPU chart
     load_chart_canvas = GooeyCanvas_Create(screen_info.width - 1050, 0, 130, 40, NULL, NULL);
     load_label = GooeyLabel_Create("Load: 0.00", 10.0f, screen_info.width - 1013, 29);
     GooeyLabel_SetColor(load_label, 0xFFFFFF);
@@ -718,7 +713,7 @@ void refresh_system_info()
     update_status_icons();
     update_cpu_chart();
     update_memory_chart();
-    update_load_chart(); // Update load chart
+    update_load_chart();
 
     printf("System info refreshed\n");
 }
@@ -739,7 +734,7 @@ void *time_update_thread(void *arg)
         {
             update_cpu_chart();
             update_memory_chart();
-            update_load_chart(); // Update load chart regularly
+            update_load_chart();
         }
         sleep(1);
     }
@@ -873,46 +868,6 @@ void handle_workspace_changed(DBusMessage *message)
     start_workspace_animation(old_workspace, new_workspace);
     glps_thread_mutex_unlock(&ui_update_mutex);
 }
-
-void start_workspace_animation(int from, int to)
-{
-    if (is_animating)
-    {
-        GooeyTimer_Stop(workspace_animation_timer);
-    }
-
-    from_workspace = from;
-    target_workspace = to;
-
-    if (to > from)
-    {
-        animation_direction = -1;
-    }
-    else if (to < from)
-    {
-        animation_direction = 1;
-    }
-    else
-    {
-        animation_direction = 0;
-    }
-
-    animation_step = 0;
-    is_animating = 1;
-
-    if (!workspace_animation_timer)
-    {
-        workspace_animation_timer = GooeyTimer_Create();
-    }
-
-    if (next_wallpaper)
-    {
-        GooeyImage_SetImage(next_wallpaper, current_wallpaper_path);
-    }
-
-    GooeyTimer_SetCallback(10, workspace_animation_timer, animation_tick, NULL);
-}
-
 void animation_tick(void *user_data)
 {
     glps_thread_mutex_lock(&ui_update_mutex);
@@ -920,11 +875,11 @@ void animation_tick(void *user_data)
     if (animation_step < total_animation_steps)
     {
         float progress = (float)animation_step / (float)total_animation_steps;
-        float eased_progress = 1.0f - powf(1.0f - progress, 3.0f);
+        float eased_progress = progress < 0.5 ? 4 * progress * progress * progress : 1 - powf(-2 * progress + 2, 3) / 2;
 
         int current_offset = (int)(eased_progress * screen_info.width);
 
-        if (animation_direction == -1)
+        if (animation_direction == 1)
         {
             if (wallpaper)
             {
@@ -935,7 +890,7 @@ void animation_tick(void *user_data)
                 GooeyWidget_MoveTo(next_wallpaper, screen_info.width - current_offset, 50);
             }
         }
-        else if (animation_direction == 1)
+        else if (animation_direction == -1)
         {
             if (wallpaper)
             {
@@ -951,8 +906,10 @@ void animation_tick(void *user_data)
     }
     else
     {
+        // Animation complete
         is_animating = 0;
 
+        // Reset positions
         if (wallpaper)
         {
             GooeyWidget_MoveTo(wallpaper, 0, 50);
@@ -960,7 +917,6 @@ void animation_tick(void *user_data)
         if (next_wallpaper)
         {
             GooeyWidget_MoveTo(next_wallpaper, 0, 50);
-            GooeyImage_SetImage(wallpaper, current_wallpaper_path);
         }
 
         current_workspace = target_workspace;
@@ -970,6 +926,55 @@ void animation_tick(void *user_data)
     }
 
     glps_thread_mutex_unlock(&ui_update_mutex);
+}
+void start_workspace_animation(int from, int to)
+{
+    if (is_animating)
+    {
+        GooeyTimer_Stop(workspace_animation_timer);
+    }
+
+    from_workspace = from;
+    target_workspace = to;
+
+    if (to > from)
+    {
+        animation_direction = 1; // Moving right: wallpaper moves left
+    }
+    else if (to < from)
+    {
+        animation_direction = -1; // Moving left: wallpaper moves right
+    }
+    else
+    {
+        animation_direction = 0;
+        return; // No animation needed
+    }
+
+    // Position next wallpaper
+    if (next_wallpaper)
+    {
+        GooeyImage_SetImage(next_wallpaper, current_wallpaper_path);
+        if (animation_direction == 1)
+        {
+            GooeyWidget_MoveTo(next_wallpaper, screen_info.width, 50);
+        }
+        else if (animation_direction == -1)
+        {
+            GooeyWidget_MoveTo(next_wallpaper, -screen_info.width, 50);
+        }
+    }
+
+    animation_step = 0;
+    is_animating = 1;
+
+    if (!workspace_animation_timer)
+    {
+        workspace_animation_timer = GooeyTimer_Create();
+    }
+
+    int interval_ms = animation_duration / total_animation_steps;
+    GooeyTimer_SetCallback(interval_ms, workspace_animation_timer, animation_tick, NULL);
 }
 
 void handle_wallpaper_changed(DBusMessage *message)
@@ -1134,9 +1139,9 @@ int main(int argc, char **argv)
     GooeyCanvas_DrawLine(canvas, screen_info.width - 430, 0, screen_info.width - 430, 50, 0xFFFFFF);
 
     get_cpu_usage();
-    create_load_chart();   // Create load chart first (leftmost)
-    create_cpu_chart();    // Then CPU chart
-    create_memory_chart(); // Then memory chart
+    create_load_chart();
+    create_cpu_chart();
+    create_memory_chart();
 
     draw_workspace_numbers();
 
