@@ -35,15 +35,21 @@ int battery_level = 85;
 char network_status[64] = "Connected";
 int current_workspace = 1;
 
+// CPU chart variables
 GooeyCanvas *cpu_chart_canvas = NULL;
 float cpu_percentages[60];
-
 int cpu_index = 0;
 int max_cpu_history = 60;
 unsigned long long last_total = 0;
 unsigned long long last_idle = 0;
 int is_first_cpu_read = 1;
 GooeyLabel *cpu_label = NULL;
+
+// Memory chart variables
+GooeyCanvas *mem_chart_canvas = NULL;
+float mem_percentages[60];
+int mem_index = 0;
+GooeyLabel *mem_label = NULL;
 
 static DBusConnection *dbus_conn = NULL;
 static int dbus_initialized = 0;
@@ -76,6 +82,11 @@ float get_cpu_usage();
 void update_cpu_chart();
 void draw_cpu_chart();
 void create_cpu_chart();
+
+float get_memory_usage();
+void update_memory_chart();
+void draw_memory_chart();
+void create_memory_chart();
 
 void run_app_menu()
 {
@@ -253,6 +264,49 @@ float get_cpu_usage()
     return fminf(fmaxf(usage, 0.0f), 100.0f);
 }
 
+float get_memory_usage()
+{
+    FILE *file = fopen("/proc/meminfo", "r");
+    if (!file)
+        return 0.0f;
+
+    char line[256];
+    unsigned long long total_mem = 0;
+    unsigned long long free_mem = 0;
+    unsigned long long buffers = 0;
+    unsigned long long cached = 0;
+
+    while (fgets(line, sizeof(line), file))
+    {
+        if (strstr(line, "MemTotal:"))
+        {
+            sscanf(line, "MemTotal: %llu kB", &total_mem);
+        }
+        else if (strstr(line, "MemFree:"))
+        {
+            sscanf(line, "MemFree: %llu kB", &free_mem);
+        }
+        else if (strstr(line, "Buffers:"))
+        {
+            sscanf(line, "Buffers: %llu kB", &buffers);
+        }
+        else if (strstr(line, "Cached:"))
+        {
+            sscanf(line, "Cached: %llu kB", &cached);
+        }
+    }
+    fclose(file);
+
+    if (total_mem == 0)
+        return 0.0f;
+
+    // Calculate used memory: Total - (Free + Buffers + Cached)
+    unsigned long long used_mem = total_mem - (free_mem + buffers + cached);
+    float usage_percent = (float)used_mem / (float)total_mem * 100.0f;
+
+    return fminf(fmaxf(usage_percent, 0.0f), 100.0f);
+}
+
 void update_cpu_chart()
 {
     float cpu_usage = get_cpu_usage();
@@ -277,6 +331,30 @@ void update_cpu_chart()
     glps_thread_mutex_unlock(&ui_update_mutex);
 }
 
+void update_memory_chart()
+{
+    float mem_usage = get_memory_usage();
+
+    glps_thread_mutex_lock(&ui_update_mutex);
+
+    mem_percentages[mem_index] = mem_usage;
+    mem_index = (mem_index + 1) % max_cpu_history;
+
+    if (mem_label)
+    {
+        char mem_text[16];
+        snprintf(mem_text, sizeof(mem_text), "RAM: %.1f%%", mem_usage);
+        GooeyLabel_SetText(mem_label, mem_text);
+    }
+
+    if (mem_chart_canvas)
+    {
+        draw_memory_chart();
+    }
+
+    glps_thread_mutex_unlock(&ui_update_mutex);
+}
+
 void draw_cpu_chart()
 {
     if (!cpu_chart_canvas)
@@ -289,9 +367,11 @@ void draw_cpu_chart()
     int chart_x = 5;
     int chart_y = 10;
 
+    // Draw chart background
     GooeyCanvas_DrawRectangle(cpu_chart_canvas, chart_x, chart_y, chart_width, chart_height,
                               0x333333, true, 1.0f, true, 3.0f);
 
+    // Draw chart border
     GooeyCanvas_DrawRectangle(cpu_chart_canvas, chart_x, chart_y, chart_width, chart_height,
                               0x555555, false, 1.0f, true, 3.0f);
 
@@ -312,13 +392,11 @@ void draw_cpu_chart()
 
             unsigned long color;
             if (usage < 50)
-                color = 0x00FF00;
-
+                color = 0x00FF00; // Green
             else if (usage < 75)
-                color = 0xFFFF00;
-
+                color = 0xFFFF00; // Yellow
             else
-                color = 0xFF0000;
+                color = 0xFF0000; // Red
 
             int x = chart_x + (max_cpu_history - i - 1) * bar_width;
             int y = chart_y + chart_height - bar_height;
@@ -328,21 +406,77 @@ void draw_cpu_chart()
         }
     }
 
+    // Draw current usage line
     float current_usage = cpu_percentages[(cpu_index - 1 + max_cpu_history) % max_cpu_history];
     int line_y = chart_y + chart_height - (int)((current_usage / 100.0f) * chart_height);
     GooeyCanvas_DrawLine(cpu_chart_canvas, chart_x, line_y, chart_x + chart_width, line_y, 0xFFFFFF);
 }
 
+void draw_memory_chart()
+{
+    if (!mem_chart_canvas)
+        return;
+
+    GooeyCanvas_Clear(mem_chart_canvas);
+
+    int chart_width = 120;
+    int chart_height = 30;
+    int chart_x = 5;
+    int chart_y = 10;
+
+    // Draw chart background
+    GooeyCanvas_DrawRectangle(mem_chart_canvas, chart_x, chart_y, chart_width, chart_height,
+                              0x333333, true, 1.0f, true, 3.0f);
+
+    // Draw chart border
+    GooeyCanvas_DrawRectangle(mem_chart_canvas, chart_x, chart_y, chart_width, chart_height,
+                              0x555555, false, 1.0f, true, 3.0f);
+
+    int bar_width = chart_width / max_cpu_history;
+    if (bar_width < 1)
+        bar_width = 1;
+
+    for (int i = 0; i < max_cpu_history; i++)
+    {
+        int idx = (mem_index - i - 1 + max_cpu_history) % max_cpu_history;
+        float usage = mem_percentages[idx];
+
+        if (usage > 0)
+        {
+            int bar_height = (int)((usage / 100.0f) * chart_height);
+            if (bar_height < 1)
+                bar_height = 1;
+
+            unsigned long color;
+            if (usage < 50)
+                color = 0x0099FF; // Blue
+            else if (usage < 75)
+                color = 0xFF9900; // Orange
+            else
+                color = 0xFF0066; // Magenta/Pink
+
+            int x = chart_x + (max_cpu_history - i - 1) * bar_width;
+            int y = chart_y + chart_height - bar_height;
+
+            GooeyCanvas_DrawRectangle(mem_chart_canvas, x, y, bar_width - 1, bar_height,
+                                      color, true, 1.0f, false, 0);
+        }
+    }
+
+    // Draw current usage line
+    float current_usage = mem_percentages[(mem_index - 1 + max_cpu_history) % max_cpu_history];
+    int line_y = chart_y + chart_height - (int)((current_usage / 100.0f) * chart_height);
+    GooeyCanvas_DrawLine(mem_chart_canvas, chart_x, line_y, chart_x + chart_width, line_y, 0xFFFFFF);
+}
+
 void create_cpu_chart()
 {
-
     for (int i = 0; i < max_cpu_history; i++)
     {
         cpu_percentages[i] = 0.0f;
     }
 
     cpu_chart_canvas = GooeyCanvas_Create(screen_info.width - 600, 0, 130, 40, NULL, NULL);
-
     cpu_label = GooeyLabel_Create("CPU: 0.0%", 10.0f, screen_info.width - 560, 29);
     GooeyLabel_SetColor(cpu_label, 0xFFFFFF);
 
@@ -350,6 +484,23 @@ void create_cpu_chart()
     GooeyWindow_RegisterWidget(win, cpu_label);
 
     draw_cpu_chart();
+}
+
+void create_memory_chart()
+{
+    for (int i = 0; i < max_cpu_history; i++)
+    {
+        mem_percentages[i] = 0.0f;
+    }
+
+    mem_chart_canvas = GooeyCanvas_Create(screen_info.width - 750, 0, 130, 40, NULL, NULL);
+    mem_label = GooeyLabel_Create("RAM: 0.0%", 10.0f, screen_info.width - 713, 29);
+    GooeyLabel_SetColor(mem_label, 0xFFFFFF);
+
+    GooeyWindow_RegisterWidget(win, mem_chart_canvas);
+    GooeyWindow_RegisterWidget(win, mem_label);
+
+    draw_memory_chart();
 }
 
 void refresh_system_info()
@@ -373,6 +524,7 @@ void refresh_system_info()
     glps_thread_mutex_unlock(&ui_update_mutex);
     update_status_icons();
     update_cpu_chart();
+    update_memory_chart();
 
     printf("System info refreshed\n");
 }
@@ -391,8 +543,8 @@ void *time_update_thread(void *arg)
         }
         else
         {
-
             update_cpu_chart();
+            update_memory_chart();
         }
         sleep(1);
     }
@@ -663,13 +815,16 @@ int main(int argc, char **argv)
     GooeyWindow_RegisterWidget(win, time_label);
     GooeyWindow_RegisterWidget(win, date_label);
 
-    
     init_system_settings();
     update_status_icons();
     update_time_date();
 
+    GooeyCanvas_DrawLine(canvas, screen_info.width - 430, 0, screen_info.width - 430, 50, 0xFFFFFF);
+
     get_cpu_usage();
     create_cpu_chart();
+    create_memory_chart();
+
     gthread_t time_thread;
     if (glps_thread_create(&time_thread, NULL, time_update_thread, NULL) != 0)
     {
@@ -701,6 +856,7 @@ int main(int argc, char **argv)
     printf("Screen resolution: %dx%d\n", screen_info.width, screen_info.height);
     printf("Initial wallpaper: %s\n", current_wallpaper_path);
     printf("CPU chart initialized with %d sample history\n", max_cpu_history);
+    printf("Memory chart initialized with %d sample history\n", max_cpu_history);
     printf("Entering main window loop...\n");
 
     GooeyWindow_Run(1, win);
