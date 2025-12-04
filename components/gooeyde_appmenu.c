@@ -529,11 +529,7 @@ static void create_ui(void) {
         GooeyContainer_AddWidget(main_window, main_container, 0, background);
     }
     int title_x = screen_info.width / 2 - 150;
-    title_label = GooeyLabel_Create("Application Launcher", layout.title_font_size, title_x, 50);
-    if (title_label) {
-        GooeyLabel_SetColor(title_label, 0xFFFFFF);
-        GooeyContainer_AddWidget(main_window, main_container, 0, title_label);
-    }
+   
     int search_x = (screen_info.width - layout.search_width) / 2;
     int search_y = 100;
     search_input = GooeyTextBox_Create(search_x, search_y,
@@ -550,8 +546,8 @@ static void create_ui(void) {
         GooeyContainer_AddWidget(main_window, main_container, 0, close_button);
     }
     page_info_label = GooeyLabel_Create("", layout.label_font_size, 
-                                       screen_info.width / 2, 
-                                       screen_info.height - 40);
+                                       screen_info.width / 2 - 70, 
+                                       screen_info.height - 50);
     if (page_info_label) {
         GooeyLabel_SetColor(page_info_label, 0x888888);
         GooeyContainer_AddWidget(main_window, main_container, 0, page_info_label);
@@ -568,7 +564,7 @@ static void create_ui(void) {
         GooeyWidget_MakeVisible(prev_button, 0);
     }
     prev_label = GooeyLabel_Create("Previous", layout.label_font_size, 
-                                  grid_margin_x + layout.nav_button_width / 2 - 10,
+                                  grid_margin_x + layout.nav_button_width / 2 - 30,
                                   nav_button_y + layout.nav_button_height / 2 + 5);
     if (prev_label) {
         GooeyLabel_SetColor(prev_label, 0xFFFFFF);
@@ -587,7 +583,7 @@ static void create_ui(void) {
         GooeyWidget_MakeVisible(next_button, 0);
     }
     next_label = GooeyLabel_Create("Next", layout.label_font_size, 
-                                 grid_margin_x + grid_width - layout.nav_button_width / 2 - 10,
+                                 grid_margin_x + grid_width - layout.nav_button_width / 2 - 20,
                                  nav_button_y + layout.nav_button_height / 2 + 5);
     if (next_label) {
         GooeyLabel_SetColor(next_label, 0xFFFFFF);
@@ -751,6 +747,8 @@ int main(int argc, char **argv) {
         cleanup_application();
         return 1;
     }
+    GooeyTheme* theme = GooeyTheme_LoadFromFile("/usr/local/share/gooeyde/assets/dark.json");
+    GooeyWindow_SetTheme(main_window, theme);
     main_window->vk = NULL;
     create_ui();
     glps_thread_create(&app_detect_thread, NULL, detect_apps_thread_func, NULL);

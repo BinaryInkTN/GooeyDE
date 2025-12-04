@@ -188,6 +188,7 @@ typedef struct GooeyShellState
     DBusError dbus_error;
     int is_dbus_init;
     int supports_opacity;
+    char *custom_scripts[256];
 } GooeyShellState;
 #include "gooey_shell_core.h"
 #include "gooey_shell_tiling.h"

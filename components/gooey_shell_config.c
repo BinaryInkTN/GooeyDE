@@ -427,14 +427,14 @@ void GrabKeys(GooeyShellState *state)
             keycode = ParseKeybind(state, state->keybinds.switch_workspace[i], &mod_mask);
             if (keycode != 0U)
             {
-                (void)XGrabKey(state->display, keycode, mod_mask, 
-                             state->root, True, GrabModeAsync, GrabModeAsync);
-                (void)XGrabKey(state->display, keycode, mod_mask | LockMask, 
-                             state->root, True, GrabModeAsync, GrabModeAsync);
-                (void)XGrabKey(state->display, keycode, mod_mask | Mod2Mask, 
-                             state->root, True, GrabModeAsync, GrabModeAsync);
-                (void)XGrabKey(state->display, keycode, mod_mask | LockMask | Mod2Mask, 
-                             state->root, True, GrabModeAsync, GrabModeAsync);
+                (void)XGrabKey(state->display, keycode, mod_mask,
+                               state->root, True, GrabModeAsync, GrabModeAsync);
+                (void)XGrabKey(state->display, keycode, mod_mask | LockMask,
+                               state->root, True, GrabModeAsync, GrabModeAsync);
+                (void)XGrabKey(state->display, keycode, mod_mask | Mod2Mask,
+                               state->root, True, GrabModeAsync, GrabModeAsync);
+                (void)XGrabKey(state->display, keycode, mod_mask | LockMask | Mod2Mask,
+                               state->root, True, GrabModeAsync, GrabModeAsync);
             }
         }
     }
@@ -447,19 +447,19 @@ void GrabKeys(GooeyShellState *state)
             keycode = ParseKeybind(state, actual_keybinds[i].keybind_str, &mod_mask);
             if (keycode != 0U)
             {
-                (void)XGrabKey(state->display, keycode, mod_mask, 
-                             state->root, True, GrabModeAsync, GrabModeAsync);
-                (void)XGrabKey(state->display, keycode, mod_mask | LockMask, 
-                             state->root, True, GrabModeAsync, GrabModeAsync);
-                (void)XGrabKey(state->display, keycode, mod_mask | Mod2Mask, 
-                             state->root, True, GrabModeAsync, GrabModeAsync);
-                (void)XGrabKey(state->display, keycode, mod_mask | LockMask | Mod2Mask, 
-                             state->root, True, GrabModeAsync, GrabModeAsync);
+                (void)XGrabKey(state->display, keycode, mod_mask,
+                               state->root, True, GrabModeAsync, GrabModeAsync);
+                (void)XGrabKey(state->display, keycode, mod_mask | LockMask,
+                               state->root, True, GrabModeAsync, GrabModeAsync);
+                (void)XGrabKey(state->display, keycode, mod_mask | Mod2Mask,
+                               state->root, True, GrabModeAsync, GrabModeAsync);
+                (void)XGrabKey(state->display, keycode, mod_mask | LockMask | Mod2Mask,
+                               state->root, True, GrabModeAsync, GrabModeAsync);
             }
             else
             {
-                LogError("GrabKeys: Failed to parse keybind: %s = %s", 
-                        actual_keybinds[i].name, actual_keybinds[i].keybind_str);
+                LogError("GrabKeys: Failed to parse keybind: %s = %s",
+                         actual_keybinds[i].name, actual_keybinds[i].keybind_str);
             }
         }
     }
@@ -557,7 +557,8 @@ int ParseColor(const char *color_str)
         return 0x808080;
     }
     return 0x2196F3;
-}void CreateDefaultConfig(const char *config_path)
+}
+void CreateDefaultConfig(const char *config_path)
 {
     FILE *file = NULL;
     const mode_t CONFIG_FILE_MODE = 0644;
@@ -569,8 +570,8 @@ int ParseColor(const char *color_str)
     file = fopen(config_path, "w");
     if (file == NULL)
     {
-        LogError("CreateDefaultConfig: Failed to create config file: %s (error: %d)", 
-                config_path, errno);
+        LogError("CreateDefaultConfig: Failed to create config file: %s (error: %d)",
+                 config_path, errno);
         return;
     }
     (void)fprintf(file, "# Gooey Shell Configuration File\n");
@@ -697,32 +698,40 @@ int GooeyShell_LoadConfig(GooeyShellState *state, const char *config_path)
         char *equals_pos = strchr(line, '=');
         char *key_start = line;
         char *value_start = NULL;
-        while (*key_start == ' ' || *key_start == '\t') {
+        while (*key_start == ' ' || *key_start == '\t')
+        {
             key_start++;
         }
-        if (*key_start == '#' || *key_start == '\n' || *key_start == '\r' || *key_start == '\0') {
+        if (*key_start == '#' || *key_start == '\n' || *key_start == '\r' || *key_start == '\0')
+        {
             continue;
         }
-        if (equals_pos != NULL) {
+        if (equals_pos != NULL)
+        {
             char key[128] = {0};
             size_t key_len = equals_pos - key_start;
-            if (key_len > 0 && key_len < sizeof(key) - 1) {
+            if (key_len > 0 && key_len < sizeof(key) - 1)
+            {
                 strncpy(key, key_start, key_len);
                 key[key_len] = '\0';
                 char *end = key + strlen(key) - 1;
-                while (end >= key && (*end == ' ' || *end == '\t')) {
+                while (end >= key && (*end == ' ' || *end == '\t'))
+                {
                     *end = '\0';
                     end--;
                 }
                 value_start = equals_pos + 1;
-                while (*value_start == ' ' || *value_start == '\t') {
+                while (*value_start == ' ' || *value_start == '\t')
+                {
                     value_start++;
                 }
                 char *value_end = value_start + strlen(value_start) - 1;
-                while (value_end >= value_start && (*value_end == '\n' || *value_end == '\r' || *value_end == ' ' || *value_end == '\t')) {
+                while (value_end >= value_start && (*value_end == '\n' || *value_end == '\r' || *value_end == ' ' || *value_end == '\t'))
+                {
                     *value_end = '\0';
                     value_end--;
                 }
+
                 if (strcmp(key, "wallpaper_path") == 0)
                 {
                     SAFE_FREE(state->wallpaper_path);
@@ -735,8 +744,8 @@ int GooeyShell_LoadConfig(GooeyShellState *state, const char *config_path)
                 else if (strcmp(key, "focused_border_color") == 0)
                 {
                     state->focused_border_color = ParseColor(value_start);
-                    LogInfo("Config: focused_border_color = %s (0x%06X)", 
-                           value_start, state->focused_border_color);
+                    LogInfo("Config: focused_border_color = %s (0x%06X)",
+                            value_start, state->focused_border_color);
                 }
                 else if (strcmp(key, "logout_command") == 0)
                 {
@@ -949,24 +958,30 @@ int WriteConfigKey(const char *config_path, const char *key, const char *value)
         char *equals_pos = strchr(line, '=');
         char current_key[128] = {0};
         char *line_start = line;
-        while (*line_start == ' ' || *line_start == '\t') {
+        while (*line_start == ' ' || *line_start == '\t')
+        {
             line_start++;
         }
-        if (*line_start == '#' || *line_start == '\n' || *line_start == '\r' || *line_start == '\0') {
+        if (*line_start == '#' || *line_start == '\n' || *line_start == '\r' || *line_start == '\0')
+        {
             fputs(line, out_file);
             continue;
         }
-        if (equals_pos != NULL) {
+        if (equals_pos != NULL)
+        {
             size_t key_len = equals_pos - line_start;
-            if (key_len > 0 && key_len < sizeof(current_key) - 1) {
+            if (key_len > 0 && key_len < sizeof(current_key) - 1)
+            {
                 strncpy(current_key, line_start, key_len);
                 current_key[key_len] = '\0';
                 char *end = current_key + strlen(current_key) - 1;
-                while (end >= current_key && (*end == ' ' || *end == '\t')) {
+                while (end >= current_key && (*end == ' ' || *end == '\t'))
+                {
                     *end = '\0';
                     end--;
                 }
-                if (strcmp(current_key, key) == 0) {
+                if (strcmp(current_key, key) == 0)
+                {
                     fprintf(out_file, "%s = %s\n", key, value);
                     key_found = 1;
                     continue;
@@ -975,15 +990,19 @@ int WriteConfigKey(const char *config_path, const char *key, const char *value)
         }
         fputs(line, out_file);
     }
-    if (!key_found) {
+    if (!key_found)
+    {
         fprintf(out_file, "%s = %s\n", key, value);
     }
     fclose(in_file);
     fclose(out_file);
-    if (rename(temp_path, expanded_path) == 0) {
+    if (rename(temp_path, expanded_path) == 0)
+    {
         result = 0;
         LogInfo("WriteConfigKey: Updated %s = %s in %s", key, value, expanded_path);
-    } else {
+    }
+    else
+    {
         LogError("WriteConfigKey: Failed to rename temp file: %s", strerror(errno));
         remove(temp_path);
     }
