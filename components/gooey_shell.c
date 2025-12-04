@@ -1320,6 +1320,13 @@ int DetectAppTypeByTitleClass(GooeyShellState *state, Window client, int *is_des
             SafeXFree(text_prop.value);
             return 1;
         }
+        else if ((strstr(lower_title, "config") != NULL))
+        {
+            *is_fullscreen = 1;
+            *stay_on_top = 1;
+            SafeXFree(text_prop.value);
+            return 1;
+        }
         else if ((strstr(lower_title, "app menu") != NULL) ||
                  (strstr(lower_title, "application menu") != NULL) ||
                  (strstr(lower_title, "gooeyde_appmenu") != NULL) ||
@@ -1674,6 +1681,10 @@ int CreateFrameWindow(GooeyShellState *state, Window client, int is_desktop_app)
             LogInfo("CreateFrameWindow: Tiling %d windows after new window creation", tiled_count);
             TileWindowsOnWorkspace(state, ws);
         }
+    }
+    else
+    {
+        FocusWindow(state, new_node);
     }
     RegrabKeys(state);
     return 1;

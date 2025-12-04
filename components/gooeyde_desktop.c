@@ -4,11 +4,14 @@
 #include <unistd.h>
 #include <time.h>
 #include <ctype.h>
+#include <sys/sysinfo.h>
+#include <math.h>
 #include <Gooey/gooey.h>
 #include <GLPS/glps_thread.h>
 #include <dbus/dbus.h>
 #include "utils/resolution_helper.h"
 #include "utils/devices_helper.h"
+
 ScreenInfo screen_info;
 GooeyWindow *win = NULL;
 GooeyLabel *time_label = NULL;
@@ -31,13 +34,26 @@ int current_brightness = 80;
 int battery_level = 85;
 char network_status[64] = "Connected";
 int current_workspace = 1;
+
+GooeyCanvas *cpu_chart_canvas = NULL;
+float cpu_percentages[60];
+
+int cpu_index = 0;
+int max_cpu_history = 60;
+unsigned long long last_total = 0;
+unsigned long long last_idle = 0;
+int is_first_cpu_read = 1;
+GooeyLabel *cpu_label = NULL;
+
 static DBusConnection *dbus_conn = NULL;
 static int dbus_initialized = 0;
 static int dbus_thread_running = 1;
 static gthread_mutex_t ui_update_mutex;
+
 #define DBUS_SERVICE "dev.binaryink.gshell"
 #define DBUS_PATH "/dev/binaryink/gshell"
 #define DBUS_INTERFACE "dev.binaryink.gshell"
+
 void run_app_menu();
 void run_systemsettings();
 void init_system_settings();
@@ -55,6 +71,12 @@ void create_status_icons();
 void update_workspace_indicator(int workspace);
 void mute_audio_callback();
 void change_wallpaper(const char *wallpaper_path);
+
+float get_cpu_usage();
+void update_cpu_chart();
+void draw_cpu_chart();
+void create_cpu_chart();
+
 void run_app_menu()
 {
     if (fork() == 0)
@@ -64,6 +86,7 @@ void run_app_menu()
         exit(1);
     }
 }
+
 void run_systemsettings()
 {
     printf("Launching System Settings...\n");
@@ -88,6 +111,7 @@ void run_systemsettings()
         exit(1);
     }
 }
+
 void init_system_settings()
 {
     current_brightness = 80;
@@ -109,6 +133,7 @@ void init_system_settings()
     printf("  Battery: %d%%\n", battery_level);
     printf("  Network: %s\n", network_status);
 }
+
 void update_status_icons()
 {
     glps_thread_mutex_lock(&ui_update_mutex);
@@ -169,6 +194,7 @@ void update_status_icons()
     }
     glps_thread_mutex_unlock(&ui_update_mutex);
 }
+
 void update_time_date()
 {
     time_t raw_time;
@@ -186,6 +212,146 @@ void update_time_date()
         GooeyLabel_SetText(date_label, date_buffer);
     glps_thread_mutex_unlock(&ui_update_mutex);
 }
+
+float get_cpu_usage()
+{
+    FILE *file = fopen("/proc/stat", "r");
+    if (!file)
+        return 0.0f;
+
+    char line[256];
+    unsigned long long user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice;
+
+    if (fgets(line, sizeof(line), file))
+    {
+        sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
+               &user, &nice, &system, &idle, &iowait, &irq, &softirq, &steal, &guest, &guest_nice);
+    }
+    fclose(file);
+
+    unsigned long long total = user + nice + system + idle + iowait + irq + softirq + steal;
+    unsigned long long idle_time = idle + iowait;
+
+    if (is_first_cpu_read)
+    {
+        last_total = total;
+        last_idle = idle_time;
+        is_first_cpu_read = 0;
+        return 0.0f;
+    }
+
+    unsigned long long total_diff = total - last_total;
+    unsigned long long idle_diff = idle_time - last_idle;
+
+    last_total = total;
+    last_idle = idle_time;
+
+    if (total_diff == 0)
+        return 0.0f;
+
+    float usage = 100.0f * (1.0f - ((float)idle_diff / (float)total_diff));
+    return fminf(fmaxf(usage, 0.0f), 100.0f);
+}
+
+void update_cpu_chart()
+{
+    float cpu_usage = get_cpu_usage();
+
+    glps_thread_mutex_lock(&ui_update_mutex);
+
+    cpu_percentages[cpu_index] = cpu_usage;
+    cpu_index = (cpu_index + 1) % max_cpu_history;
+
+    if (cpu_label)
+    {
+        char cpu_text[16];
+        snprintf(cpu_text, sizeof(cpu_text), "CPU: %.1f%%", cpu_usage);
+        GooeyLabel_SetText(cpu_label, cpu_text);
+    }
+
+    if (cpu_chart_canvas)
+    {
+        draw_cpu_chart();
+    }
+
+    glps_thread_mutex_unlock(&ui_update_mutex);
+}
+
+void draw_cpu_chart()
+{
+    if (!cpu_chart_canvas)
+        return;
+
+    GooeyCanvas_Clear(cpu_chart_canvas);
+
+    int chart_width = 120;
+    int chart_height = 30;
+    int chart_x = 5;
+    int chart_y = 10;
+
+    GooeyCanvas_DrawRectangle(cpu_chart_canvas, chart_x, chart_y, chart_width, chart_height,
+                              0x333333, true, 1.0f, true, 3.0f);
+
+    GooeyCanvas_DrawRectangle(cpu_chart_canvas, chart_x, chart_y, chart_width, chart_height,
+                              0x555555, false, 1.0f, true, 3.0f);
+
+    int bar_width = chart_width / max_cpu_history;
+    if (bar_width < 1)
+        bar_width = 1;
+
+    for (int i = 0; i < max_cpu_history; i++)
+    {
+        int idx = (cpu_index - i - 1 + max_cpu_history) % max_cpu_history;
+        float usage = cpu_percentages[idx];
+
+        if (usage > 0)
+        {
+            int bar_height = (int)((usage / 100.0f) * chart_height);
+            if (bar_height < 1)
+                bar_height = 1;
+
+            unsigned long color;
+            if (usage < 50)
+                color = 0x00FF00;
+
+            else if (usage < 75)
+                color = 0xFFFF00;
+
+            else
+                color = 0xFF0000;
+
+            int x = chart_x + (max_cpu_history - i - 1) * bar_width;
+            int y = chart_y + chart_height - bar_height;
+
+            GooeyCanvas_DrawRectangle(cpu_chart_canvas, x, y, bar_width - 1, bar_height,
+                                      color, true, 1.0f, false, 0);
+        }
+    }
+
+    float current_usage = cpu_percentages[(cpu_index - 1 + max_cpu_history) % max_cpu_history];
+    int line_y = chart_y + chart_height - (int)((current_usage / 100.0f) * chart_height);
+    GooeyCanvas_DrawLine(cpu_chart_canvas, chart_x, line_y, chart_x + chart_width, line_y, 0xFFFFFF);
+}
+
+void create_cpu_chart()
+{
+
+    for (int i = 0; i < max_cpu_history; i++)
+    {
+        cpu_percentages[i] = 0.0f;
+    }
+
+    cpu_chart_canvas = GooeyCanvas_Create(screen_info.width - 600, 0, 130, 40, NULL, NULL);
+
+    cpu_label = GooeyLabel_Create("CPU: 0.0%", 10.0f, screen_info.width - 560, 29);
+    GooeyLabel_SetColor(cpu_label, 0xFFFFFF);
+
+    GooeyWindow_RegisterWidget(win, cpu_chart_canvas);
+    GooeyWindow_RegisterWidget(win, cpu_label);
+
+    draw_cpu_chart();
+}
+
 void refresh_system_info()
 {
     printf("Refreshing system information...\n");
@@ -206,8 +372,11 @@ void refresh_system_info()
     }
     glps_thread_mutex_unlock(&ui_update_mutex);
     update_status_icons();
+    update_cpu_chart();
+
     printf("System info refreshed\n");
 }
+
 void *time_update_thread(void *arg)
 {
     printf("Time update thread started\n");
@@ -220,11 +389,17 @@ void *time_update_thread(void *arg)
             refresh_system_info();
             counter = 0;
         }
+        else
+        {
+
+            update_cpu_chart();
+        }
         sleep(1);
     }
     printf("Time update thread stopped\n");
     return NULL;
 }
+
 int init_dbus_connection()
 {
     DBusError error;
@@ -275,6 +450,7 @@ int init_dbus_connection()
     printf("DBus initialized successfully\n");
     return 1;
 }
+
 void cleanup_dbus()
 {
     if (dbus_conn)
@@ -284,6 +460,7 @@ void cleanup_dbus()
     }
     dbus_initialized = 0;
 }
+
 void *dbus_monitor_thread(void *arg)
 {
     printf("DBus monitor thread started\n");
@@ -305,6 +482,7 @@ void *dbus_monitor_thread(void *arg)
     printf("DBus monitor thread stopped\n");
     return NULL;
 }
+
 void process_dbus_message(DBusMessage *message)
 {
     if (!message)
@@ -325,6 +503,7 @@ void process_dbus_message(DBusMessage *message)
         }
     }
 }
+
 void handle_workspace_changed(DBusMessage *message)
 {
     DBusMessageIter iter;
@@ -348,6 +527,7 @@ void handle_workspace_changed(DBusMessage *message)
     current_workspace = new_workspace;
     update_workspace_indicator(new_workspace);
 }
+
 void handle_wallpaper_changed(DBusMessage *message)
 {
     DBusMessageIter iter;
@@ -369,6 +549,7 @@ void handle_wallpaper_changed(DBusMessage *message)
     printf("Wallpaper changed: %s\n", wallpaper_path);
     change_wallpaper(wallpaper_path);
 }
+
 void change_wallpaper(const char *wallpaper_path)
 {
     if (!wallpaper_path || strlen(wallpaper_path) == 0)
@@ -396,6 +577,7 @@ void change_wallpaper(const char *wallpaper_path)
         filename = wallpaper_path;
     printf("Wallpaper updated to: %s\n", wallpaper_path);
 }
+
 void update_workspace_indicator(int workspace)
 {
     char workspace_text[32];
@@ -410,11 +592,13 @@ void update_workspace_indicator(int workspace)
     snprintf(notification_text, sizeof(notification_text), "Workspace %d", workspace);
     GooeyNotifications_Run(win, notification_text, NOTIFICATION_INFO, NOTIFICATION_POSITION_TOP_RIGHT);
 }
+
 void mute_audio_callback()
 {
     mute_audio();
     update_status_icons();
 }
+
 void create_status_icons()
 {
     int icon_size = 24;
@@ -434,6 +618,7 @@ void create_status_icons()
     GooeyWindow_RegisterWidget(win, battery_status_icon);
     GooeyWindow_RegisterWidget(win, battery_percent_label);
 }
+
 int main(int argc, char **argv)
 {
     glps_thread_mutex_init(&ui_update_mutex, NULL);
@@ -466,7 +651,9 @@ int main(int argc, char **argv)
     GooeyLabel_SetColor(time_label, 0xFFFFFF);
     date_label = GooeyLabel_Create("Loading...", 12.0f, screen_info.width - 160, 40);
     GooeyLabel_SetColor(date_label, 0xCCCCCC);
+
     create_status_icons();
+
     GooeyWindow_MakeResizable(win, false);
     GooeyWindow_RegisterWidget(win, canvas);
     GooeyWindow_RegisterWidget(win, wallpaper);
@@ -475,13 +662,14 @@ int main(int argc, char **argv)
     GooeyWindow_RegisterWidget(win, settings_icon);
     GooeyWindow_RegisterWidget(win, time_label);
     GooeyWindow_RegisterWidget(win, date_label);
-    GooeyLabel *build_number_label = GooeyLabel_Create("Build: GDE-27112025-30",
-                                                       24.0f, 15, 100);
-    GooeyLabel_SetColor(build_number_label, 0xFFFFFF);
-    GooeyWindow_RegisterWidget(win, build_number_label);
+
+    
     init_system_settings();
     update_status_icons();
     update_time_date();
+
+    get_cpu_usage();
+    create_cpu_chart();
     gthread_t time_thread;
     if (glps_thread_create(&time_thread, NULL, time_update_thread, NULL) != 0)
     {
@@ -491,6 +679,7 @@ int main(int argc, char **argv)
     {
         printf("Time update thread created successfully\n");
     }
+
     gthread_t dbus_thread;
     if (init_dbus_connection())
     {
@@ -507,11 +696,15 @@ int main(int argc, char **argv)
     {
         fprintf(stderr, "DBus initialization failed\n");
     }
+
     printf("Desktop started successfully\n");
     printf("Screen resolution: %dx%d\n", screen_info.width, screen_info.height);
     printf("Initial wallpaper: %s\n", current_wallpaper_path);
+    printf("CPU chart initialized with %d sample history\n", max_cpu_history);
     printf("Entering main window loop...\n");
+
     GooeyWindow_Run(1, win);
+
     printf("Window closed, stopping threads...\n");
     time_thread_running = 0;
     dbus_thread_running = 0;
