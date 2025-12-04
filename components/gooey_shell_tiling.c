@@ -301,22 +301,27 @@ void ArrangeTilingTree(GooeyShellState *state, TilingNode *node)
 {
     int gap = 0;
     int bar_height = 0;
+
     if ((state == NULL) || (node == NULL))
     {
         return;
     }
+
     if ((node->is_leaf != 0) && (node->window != NULL))
     {
         gap = state->inner_gap;
         node->window->x = node->x + gap;
         node->window->y = node->y + gap;
         node->window->width = node->width - 2 * gap;
-        node->window->height = node->height - 2 * gap;
+
         bar_height = (node->window->monitor_number == 0) ? BAR_HEIGHT : 0;
+        node->window->height = node->height - 2 * gap - bar_height;
+
         node->window->tiling_x = node->window->x;
         node->window->tiling_y = node->window->y;
         node->window->tiling_width = node->window->width;
-        node->window->tiling_height = node->window->height - bar_height;
+        node->window->tiling_height = node->window->height;
+
         if (node->window->width < 1)
         {
             node->window->width = 1;
@@ -325,6 +330,7 @@ void ArrangeTilingTree(GooeyShellState *state, TilingNode *node)
         {
             node->window->height = 1;
         }
+
         UpdateWindowGeometry(state, node->window);
     }
     else
@@ -362,24 +368,29 @@ void ArrangeWindowsMonocleOnMonitor(GooeyShellState *state, Workspace *workspace
     Monitor *mon = NULL;
     int usable_height = 0;
     int usable_y = 0;
+
     if ((state == NULL) || (workspace == NULL))
     {
         LogError("ArrangeWindowsMonocleOnMonitor: Invalid parameters");
         return;
     }
+
     if ((monitor_number < 0) || (monitor_number >= state->monitor_info.num_monitors))
     {
         LogError("ArrangeWindowsMonocleOnMonitor: Invalid monitor number %d", monitor_number);
         return;
     }
+
     mon = &state->monitor_info.monitors[monitor_number];
-    int bar_height = monitor_number == 0 ? BAR_HEIGHT : 0;
+    int bar_height = (monitor_number == 0) ? BAR_HEIGHT : 0;
     usable_height = mon->height - 2 * state->outer_gap - bar_height;
     usable_y = mon->y + state->outer_gap + bar_height;
+
     if (usable_height <= 0)
     {
         usable_height = 100;
     }
+
     node = workspace->windows;
     while (node != NULL)
     {
@@ -390,7 +401,9 @@ void ArrangeWindowsMonocleOnMonitor(GooeyShellState *state, Workspace *workspace
             node->x = mon->x + state->outer_gap;
             node->y = usable_y + state->inner_gap;
             node->width = mon->width - 2 * state->outer_gap;
+
             node->height = usable_height - 2 * state->inner_gap;
+
             if (node->width < 1)
             {
                 node->width = 1;
@@ -399,6 +412,7 @@ void ArrangeWindowsMonocleOnMonitor(GooeyShellState *state, Workspace *workspace
             {
                 node->height = 1;
             }
+
             UpdateWindowGeometry(state, node);
         }
         node = node->next;
