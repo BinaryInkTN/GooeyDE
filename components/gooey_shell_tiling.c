@@ -398,11 +398,11 @@ void ArrangeWindowsMonocleOnMonitor(GooeyShellState *state, Workspace *workspace
             (node->is_minimized == 0) && (node->is_desktop_app == 0) &&
             (node->is_fullscreen_app == 0) && (node->monitor_number == monitor_number))
         {
+
             node->x = mon->x + state->outer_gap;
             node->y = usable_y + state->inner_gap;
             node->width = mon->width - 2 * state->outer_gap;
-
-            node->height = usable_height - 2 * state->inner_gap;
+            node->height = usable_height - 2 * state->inner_gap - bar_height;
 
             if (node->width < 1)
             {

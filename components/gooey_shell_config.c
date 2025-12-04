@@ -576,7 +576,7 @@ int ParseColor(const char *color_str)
     (void)fprintf(file, "# Gooey Shell Configuration File\n");
     (void)fprintf(file, "# Colors can be specified as hex (#RRGGBB)\n\n");
     (void)fprintf(file, "# Wallpaper path (use ~ for home directory)\n");
-    (void)fprintf(file, "wallpaper_path = \n\n");
+    (void)fprintf(file, "wallpaper_path = /usr/local/share/gooeyde/assets/bg.png\n\n");
     (void)fprintf(file, "# Focus border color (Indigo by default)\n");
     (void)fprintf(file, "focused_border_color = #3F51B5\n\n");
     (void)fprintf(file, "# Logout command\n");
