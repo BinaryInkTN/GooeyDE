@@ -22,7 +22,6 @@ GooeyLabel *volume_label = NULL;
 GooeyLabel *brightness_label = NULL;
 GooeyLabel *battery_label = NULL;
 GooeyLabel *network_label = NULL;
-GooeyLabel *workspace_indicator = NULL;
 GooeyImage *wifi_status_icon = NULL;
 GooeyImage *volume_status_icon = NULL;
 GooeyImage *battery_status_icon = NULL;
@@ -35,7 +34,12 @@ int battery_level = 85;
 char network_status[64] = "Connected";
 int current_workspace = 1;
 
-// CPU chart variables
+GooeyCanvas *workspace_canvas = NULL;
+GooeyLabel *workspace_labels[9] = {NULL};
+int total_workspaces = 9;
+int workspace_size = 30;
+int workspace_spacing = 5;
+
 GooeyCanvas *cpu_chart_canvas = NULL;
 float cpu_percentages[60];
 int cpu_index = 0;
@@ -45,7 +49,6 @@ unsigned long long last_idle = 0;
 int is_first_cpu_read = 1;
 GooeyLabel *cpu_label = NULL;
 
-// Memory chart variables
 GooeyCanvas *mem_chart_canvas = NULL;
 float mem_percentages[60];
 int mem_index = 0;
@@ -75,6 +78,8 @@ void handle_workspace_changed(DBusMessage *message);
 void handle_wallpaper_changed(DBusMessage *message);
 void create_status_icons();
 void update_workspace_indicator(int workspace);
+void draw_workspace_numbers();
+void create_workspace_indicators();
 void mute_audio_callback();
 void change_wallpaper(const char *wallpaper_path);
 
@@ -300,7 +305,6 @@ float get_memory_usage()
     if (total_mem == 0)
         return 0.0f;
 
-    // Calculate used memory: Total - (Free + Buffers + Cached)
     unsigned long long used_mem = total_mem - (free_mem + buffers + cached);
     float usage_percent = (float)used_mem / (float)total_mem * 100.0f;
 
@@ -367,11 +371,9 @@ void draw_cpu_chart()
     int chart_x = 5;
     int chart_y = 10;
 
-    // Draw chart background
     GooeyCanvas_DrawRectangle(cpu_chart_canvas, chart_x, chart_y, chart_width, chart_height,
                               0x333333, true, 1.0f, true, 3.0f);
 
-    // Draw chart border
     GooeyCanvas_DrawRectangle(cpu_chart_canvas, chart_x, chart_y, chart_width, chart_height,
                               0x555555, false, 1.0f, true, 3.0f);
 
@@ -392,11 +394,11 @@ void draw_cpu_chart()
 
             unsigned long color;
             if (usage < 50)
-                color = 0x00FF00; // Green
+                color = 0x00FF00;
             else if (usage < 75)
-                color = 0xFFFF00; // Yellow
+                color = 0xFFFF00;
             else
-                color = 0xFF0000; // Red
+                color = 0xFF0000;
 
             int x = chart_x + (max_cpu_history - i - 1) * bar_width;
             int y = chart_y + chart_height - bar_height;
@@ -406,7 +408,6 @@ void draw_cpu_chart()
         }
     }
 
-    // Draw current usage line
     float current_usage = cpu_percentages[(cpu_index - 1 + max_cpu_history) % max_cpu_history];
     int line_y = chart_y + chart_height - (int)((current_usage / 100.0f) * chart_height);
     GooeyCanvas_DrawLine(cpu_chart_canvas, chart_x, line_y, chart_x + chart_width, line_y, 0xFFFFFF);
@@ -424,11 +425,9 @@ void draw_memory_chart()
     int chart_x = 5;
     int chart_y = 10;
 
-    // Draw chart background
     GooeyCanvas_DrawRectangle(mem_chart_canvas, chart_x, chart_y, chart_width, chart_height,
                               0x333333, true, 1.0f, true, 3.0f);
 
-    // Draw chart border
     GooeyCanvas_DrawRectangle(mem_chart_canvas, chart_x, chart_y, chart_width, chart_height,
                               0x555555, false, 1.0f, true, 3.0f);
 
@@ -449,11 +448,11 @@ void draw_memory_chart()
 
             unsigned long color;
             if (usage < 50)
-                color = 0x0099FF; // Blue
+                color = 0x0099FF;
             else if (usage < 75)
-                color = 0xFF9900; // Orange
+                color = 0xFF9900;
             else
-                color = 0xFF0066; // Magenta/Pink
+                color = 0xFF0066;
 
             int x = chart_x + (max_cpu_history - i - 1) * bar_width;
             int y = chart_y + chart_height - bar_height;
@@ -463,10 +462,71 @@ void draw_memory_chart()
         }
     }
 
-    // Draw current usage line
     float current_usage = mem_percentages[(mem_index - 1 + max_cpu_history) % max_cpu_history];
     int line_y = chart_y + chart_height - (int)((current_usage / 100.0f) * chart_height);
     GooeyCanvas_DrawLine(mem_chart_canvas, chart_x, line_y, chart_x + chart_width, line_y, 0xFFFFFF);
+}
+
+void draw_workspace_numbers()
+{
+    if (!workspace_canvas)
+        return;
+
+    GooeyCanvas_Clear(workspace_canvas);
+
+    int start_x = 60;
+    int y = 10;
+
+    for (int i = 1; i <= total_workspaces; i++)
+    {
+        int x = start_x + ((i - 1) * (workspace_size + workspace_spacing));
+
+        if (i == current_workspace)
+        {
+            GooeyCanvas_DrawRectangle(workspace_canvas, x, y, workspace_size, workspace_size,
+                                      0xFFFFFF, false, 2.0f, false, 0);
+            GooeyCanvas_DrawRectangle(workspace_canvas, x, y, workspace_size, workspace_size,
+                                      0x4A90E2, true, 1.0f, false, 0);
+
+            if (workspace_labels[i - 1])
+                GooeyLabel_SetColor(workspace_labels[i - 1], 0xFFFFFF);
+        }
+        else
+        {
+            GooeyCanvas_DrawRectangle(workspace_canvas, x, y, workspace_size, workspace_size,
+                                      0x444444, true, 1.0f, false, 0);
+            GooeyCanvas_DrawRectangle(workspace_canvas, x, y, workspace_size, workspace_size,
+                                      0x666666, false, 1.0f, false, 0);
+
+            if (workspace_labels[i - 1])
+                GooeyLabel_SetColor(workspace_labels[i - 1], 0xDDDDDD);
+        }
+    }
+}
+
+void create_workspace_indicators()
+{
+    int start_x = 60;
+    int y = 10;
+
+    for (int i = 1; i <= total_workspaces; i++)
+    {
+        int x = start_x + ((i - 1) * (workspace_size + workspace_spacing));
+
+        char num_str[3];
+        snprintf(num_str, sizeof(num_str), "%d", i);
+
+        int label_x = x + 36 + (workspace_size / 2);
+        int label_y = y + 5 + (workspace_size / 2);
+
+        workspace_labels[i - 1] = GooeyLabel_Create(num_str, 14.0f, label_x, label_y);
+        if (i == current_workspace)
+            GooeyLabel_SetColor(workspace_labels[i - 1], 0xFFFFFF);
+        else
+            GooeyLabel_SetColor(workspace_labels[i - 1], 0xDDDDDD);
+
+        GooeyWindow_RegisterWidget(win, workspace_labels[i - 1]);
+    }
 }
 
 void create_cpu_chart()
@@ -732,14 +792,12 @@ void change_wallpaper(const char *wallpaper_path)
 
 void update_workspace_indicator(int workspace)
 {
-    char workspace_text[32];
-    snprintf(workspace_text, sizeof(workspace_text), "Workspace %d", workspace);
+    current_workspace = workspace;
+
     glps_thread_mutex_lock(&ui_update_mutex);
-    if (workspace_indicator)
-    {
-        GooeyLabel_SetText(workspace_indicator, workspace_text);
-    }
+    draw_workspace_numbers();
     glps_thread_mutex_unlock(&ui_update_mutex);
+
     char notification_text[64];
     snprintf(notification_text, sizeof(notification_text), "Workspace %d", workspace);
     GooeyNotifications_Run(win, notification_text, NOTIFICATION_INFO, NOTIFICATION_POSITION_TOP_RIGHT);
@@ -791,9 +849,15 @@ int main(int argc, char **argv)
     GooeyCanvas_DrawRectangle(canvas, 0, 0, screen_info.width, 50, 0x222222,
                               true, 1.0f, true, 1.0f);
     GooeyCanvas_DrawLine(canvas, 50, 0, 50, 50, 0xFFFFFF);
-    workspace_indicator = GooeyLabel_Create("Workspace 1", 18.0f,
-                                            screen_info.width / 2 - 60, 30);
-    GooeyLabel_SetColor(workspace_indicator, 0xFFFFFF);
+
+    int total_width = (total_workspaces * workspace_size) +
+                      ((total_workspaces - 1) * workspace_spacing);
+    int canvas_width = total_width + 40;
+    int canvas_height = workspace_size + 20;
+    int canvas_x = 40;
+
+    workspace_canvas = GooeyCanvas_Create(canvas_x, 0, canvas_width, canvas_height, NULL, NULL);
+
     GooeyImage *apps_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/apps.png",
                                               10, 10, 30, 30, run_app_menu, NULL);
     GooeyImage *settings_icon = GooeyImage_Create("/usr/local/share/gooeyde/assets/settings.png",
@@ -805,15 +869,16 @@ int main(int argc, char **argv)
     GooeyLabel_SetColor(date_label, 0xCCCCCC);
 
     create_status_icons();
+    create_workspace_indicators();
 
     GooeyWindow_MakeResizable(win, false);
     GooeyWindow_RegisterWidget(win, canvas);
     GooeyWindow_RegisterWidget(win, wallpaper);
-    GooeyWindow_RegisterWidget(win, workspace_indicator);
     GooeyWindow_RegisterWidget(win, apps_icon);
     GooeyWindow_RegisterWidget(win, settings_icon);
     GooeyWindow_RegisterWidget(win, time_label);
     GooeyWindow_RegisterWidget(win, date_label);
+    GooeyWindow_RegisterWidget(win, workspace_canvas);
 
     init_system_settings();
     update_status_icons();
@@ -824,6 +889,8 @@ int main(int argc, char **argv)
     get_cpu_usage();
     create_cpu_chart();
     create_memory_chart();
+
+    draw_workspace_numbers();
 
     gthread_t time_thread;
     if (glps_thread_create(&time_thread, NULL, time_update_thread, NULL) != 0)
