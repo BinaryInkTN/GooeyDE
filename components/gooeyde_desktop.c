@@ -646,9 +646,9 @@ void create_cpu_chart()
     {
         cpu_percentages[i] = 0.0f;
     }
-
-    cpu_chart_canvas = GooeyCanvas_Create(screen_info.width - 750, 0, 130, 40, NULL, NULL);
-    cpu_label = GooeyLabel_Create("CPU: 0.0%", 10.0f, screen_info.width - 710, 29);
+5, 
+    cpu_chart_canvas = GooeyCanvas_Create(screen_info.width - 630, 0, 130, 40, NULL, NULL);
+    cpu_label = GooeyLabel_Create("CPU: 0.0%", 10.0f, screen_info.width - 590, 29);
     GooeyLabel_SetColor(cpu_label, 0xFFFFFF);
 
     GooeyWindow_RegisterWidget(win, cpu_chart_canvas);
@@ -664,8 +664,8 @@ void create_memory_chart()
         mem_percentages[i] = 0.0f;
     }
 
-    mem_chart_canvas = GooeyCanvas_Create(screen_info.width - 900, 0, 130, 40, NULL, NULL);
-    mem_label = GooeyLabel_Create("RAM: 0.0%", 10.0f, screen_info.width - 863, 29);
+    mem_chart_canvas = GooeyCanvas_Create(screen_info.width - 770, 0, 130, 40, NULL, NULL);
+    mem_label = GooeyLabel_Create("RAM: 0.0%", 10.0f, screen_info.width - 730, 29);
     GooeyLabel_SetColor(mem_label, 0xFFFFFF);
 
     GooeyWindow_RegisterWidget(win, mem_chart_canvas);
@@ -681,8 +681,8 @@ void create_load_chart()
         load_percentages[i] = 0.0f;
     }
 
-    load_chart_canvas = GooeyCanvas_Create(screen_info.width - 1050, 0, 130, 40, NULL, NULL);
-    load_label = GooeyLabel_Create("Load: 0.00", 10.0f, screen_info.width - 1013, 29);
+    load_chart_canvas = GooeyCanvas_Create(screen_info.width - 910, 0, 130, 40, NULL, NULL);
+    load_label = GooeyLabel_Create("Load: 0.00", 10.0f, screen_info.width - 870, 29);
     GooeyLabel_SetColor(load_label, 0xFFFFFF);
 
     GooeyWindow_RegisterWidget(win, load_chart_canvas);
