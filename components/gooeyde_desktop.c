@@ -2,8 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <time.h>
 #include <ctype.h>
 #include <sys/sysinfo.h>
 #include <math.h>
@@ -12,6 +10,9 @@
 #include <dbus/dbus.h>
 #include "utils/resolution_helper.h"
 #include "utils/devices_helper.h"
+#include <sys/syscall.h>
+#include <unistd.h>
+#include <sys/time.h>
 
 ScreenInfo screen_info;
 GooeyWindow *win = NULL;
@@ -236,22 +237,88 @@ void update_status_icons()
 
 void update_time_date()
 {
-    time_t raw_time;
-    struct tm *time_info;
+    struct timeval tv;
+    struct tm time_info;
     char time_buffer[64];
     char date_buffer[64];
-    time(&raw_time);
-    time_info = localtime(&raw_time);
-    strftime(time_buffer, sizeof(time_buffer), "%I:%M:%S %p", time_info);
-    strftime(date_buffer, sizeof(date_buffer), "%A, %B %d", time_info);
+
+    syscall(SYS_gettimeofday, &tv, NULL);
+
+    time_t raw_time = tv.tv_sec;
+
+    long gmtoff = 0;
+    const char *tz = getenv("TZ");
+    if (tz) {
+        FILE *fp = fopen("/etc/localtime", "rb");
+        if (fp) {
+            fseek(fp, 20, SEEK_SET);
+            fread(&gmtoff, sizeof(long), 1, fp);
+            fclose(fp);
+        }
+    }
+
+    raw_time += gmtoff;
+
+    long days = raw_time / 86400;
+    long seconds = raw_time % 86400;
+
+    int year = 1970;
+    int month = 0;
+
+    while (1) {
+        int days_in_year = ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)) ? 366 : 365;
+        if (days < days_in_year) break;
+        days -= days_in_year;
+        year++;
+    }
+
+    int days_in_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)) {
+        days_in_month[1] = 29;
+    }
+
+    while (days >= days_in_month[month]) {
+        days -= days_in_month[month];
+        month++;
+    }
+
+    int day_of_month = days + 1;
+    int month_of_year = month + 1;
+
+    int hour = seconds / 3600;
+    int minute = (seconds % 3600) / 60;
+    int second = seconds % 60;
+
+    int wday = (raw_time / 86400 + 4) % 7;
+
+    const char *weekdays[] = {"Sunday", "Monday", "Tuesday", "Wednesday",
+                             "Thursday", "Friday", "Saturday"};
+    const char *months[] = {"January", "February", "March", "April", "May", "June",
+                           "July", "August", "September", "October", "November", "December"};
+
+    char *am_pm = (hour >= 12) ? "PM" : "AM";
+    int hour12 = hour % 12;
+    if (hour12 == 0) hour12 = 12;
+
+    snprintf(time_buffer, sizeof(time_buffer),
+             "%02d:%02d:%02d %s",
+             hour12, minute, second, am_pm);
+
+    snprintf(date_buffer, sizeof(date_buffer), "%s, %s %d",
+             weekdays[wday],
+             months[month],
+             day_of_month);
+
     glps_thread_mutex_lock(&ui_update_mutex);
+
     if (time_label)
         GooeyLabel_SetText(time_label, time_buffer);
+
     if (date_label)
         GooeyLabel_SetText(date_label, date_buffer);
+
     glps_thread_mutex_unlock(&ui_update_mutex);
 }
-
 float get_cpu_usage()
 {
     FILE *file = fopen("/proc/stat", "r");
@@ -646,7 +713,7 @@ void create_cpu_chart()
     {
         cpu_percentages[i] = 0.0f;
     }
-5, 
+5,
     cpu_chart_canvas = GooeyCanvas_Create(screen_info.width - 630, 0, 130, 40, NULL, NULL);
     cpu_label = GooeyLabel_Create("CPU: 0.0%", 10.0f, screen_info.width - 590, 29);
     GooeyLabel_SetColor(cpu_label, 0xFFFFFF);
